@@ -21,7 +21,7 @@ const orderSchema = new mongoose.Schema({
 
   kotNumber: { type: Number, default: 1 },
 
-  // Petpooja Multi-KOT support: Each punch creates a new KOT record for kitchen
+  // Multi-KOT support: Each punch creates a new KOT record for kitchen
   kots: [{
     kotNumber: Number,
     punchedAt: { type: Date, default: Date.now },
@@ -63,7 +63,7 @@ const orderSchema = new mongoose.Schema({
     kotNumber: { type: Number, default: 1 }
   }],
 
-  // ---- Status History Timeline (Petpooja style) ----
+  // ---- Status History Timeline ----
   statusHistory: [{
     status: { type: String, enum: ['placed', 'preparing', 'ready', 'billed', 'completed', 'cancelled'] },
     timestamp: { type: Date, default: Date.now },

@@ -22,7 +22,7 @@ import {
   ShiftTableModal,
   ItemModifierModal,
   KeyboardShortcutsBanner
-} from './PetpoojaComponents';
+} from './PosComponents';
 
 import { api } from '../api';
 import ReceiptPrintArea from './Receiptprintarea';
@@ -139,7 +139,7 @@ function Dashboard({ handleLogout }) {
   const [selectedMenuItem, setSelectedMenuItem] = useState(null);
   const [menuItemModalQuantity, setMenuItemModalQuantity] = useState(1);
 
-  // Petpooja Modals & Dialogs State
+  // POS modal and dialog state
   const [settleOrderModal, setSettleOrderModal] = useState(null);
   const [shiftTableModal, setShiftTableModal] = useState(null);
   const [qrModalTable, setQrModalTable] = useState(null);
@@ -683,7 +683,7 @@ const [selectedRecipe, setSelectedRecipe] = useState(null);
 
   const currentRunningOrder = selectedTable ? getCombinedOrderForTable(selectedTable._id) : null;
 
-  // Petpooja rule: Settle/Bill payment is only allowed once the Kitchen (KDS)
+  // Billing rule: Settle/Bill payment is only allowed once the Kitchen (KDS)
   // has marked the order as "ready". This forces the correct flow:
   // KOT punched -> goes to Kitchen -> Kitchen marks Ready -> THEN Settle/Bill.
   const isOrderReadyToSettle = !!(currentRunningOrder && currentRunningOrder.orderStatus === 'ready');
@@ -870,7 +870,7 @@ const [selectedRecipe, setSelectedRecipe] = useState(null);
   };
 
   // -------------------------------------------------------------------------
-  // Petpooja KOT Workflow: Save & Print KOT
+  // KOT workflow: Save & Print KOT
   // -------------------------------------------------------------------------
   const handlePrintKOT = () => {
     if (cart.length === 0 && !currentRunningOrder) {
@@ -2749,7 +2749,7 @@ const topSellingItem = Object.entries(itemSalesSummary).sort((a, b) => b[1] - a[
                   </div>
                 </div>
 
-                {/* Cart Footer: Bill Summary & Petpooja Action Buttons */}
+                {/* Cart Footer: Bill Summary & quick action buttons */}
                 <div style={{ borderTop: '1px solid #e2e8f0', paddingTop: '10px', marginTop: '10px' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
                     <label style={{ fontSize: '11px', color: '#64748b' }}>Discount (%):</label>
@@ -4219,7 +4219,7 @@ const topSellingItem = Object.entries(itemSalesSummary).sort((a, b) => b[1] - a[
                 </button>
               </form>
 
-              {/* Add Menu Item - Petpooja Style */}
+              {/* Add Menu Item */}
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(420px, 1fr))', gap: '20px', marginBottom: '20px' }}>
                 <form
                   onSubmit={async (e) => {
@@ -4243,7 +4243,7 @@ const topSellingItem = Object.entries(itemSalesSummary).sort((a, b) => b[1] - a[
                 >
                   <h3 style={{ margin: '0 0 16px 0', fontSize: '16px', color: '#0f172a', display: 'flex', alignItems: 'center', gap: '8px' }}>🍔 Add Menu Item</h3>
 
-                  {/* Image Upload Section - Petpooja Style */}
+                  {/* Image upload section */}
                   <div style={{ display: 'flex', gap: '16px', marginBottom: '14px', alignItems: 'flex-start' }}>
                     {/* Image Preview Box */}
                     <div style={{ flexShrink: 0 }}>

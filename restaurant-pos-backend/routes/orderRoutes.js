@@ -220,7 +220,7 @@ router.post(['/', '/create'], async (req, res) => {
   }
 });
 
-// 2. Petpooja Multi-KOT Punch: Add extra items to a running order as a new KOT
+// 2. Multi-KOT Punch: Add extra items to a running order as a new KOT
 router.post('/kot/punch/:orderId', async (req, res) => {
   try {
     const { newItems = [], discount, waiterName } = req.body;
@@ -388,7 +388,7 @@ router.put('/status/:orderId', async (req, res) => {
   }
 });
 
-// 5. Complete Order & Payment Settlement (Petpooja Settle)
+// 5. Complete Order & Payment Settlement
 router.put('/pay/:orderId', async (req, res) => {
   try {
     const { paymentMode, cashTendered = 0, changeReturn, splitAmounts, paymentReference = '', paymentProvider = 'manual', updatedBy } = req.body;

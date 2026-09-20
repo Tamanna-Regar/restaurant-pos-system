@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// Petpooja-style clean, high-density UI styling.
+// Clean, high-density POS UI styling.
 // Palette: orange-red brand primary, white surfaces, dark ink text.
 // ---------------------------------------------------------------------------
 export const ui = {

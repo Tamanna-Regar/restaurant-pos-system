@@ -141,7 +141,7 @@ export default function ReportsAndCosting() {
       <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', marginBottom: 18 }}>
         <div>
           <h2 style={{ margin: 0, color: '#0f172a' }}>📊 Reports & Food Cost</h2>
-          <p style={{ margin: '5px 0 0', color: '#64748b', fontSize: 13 }}>Petpooja-style sales, tax and recipe-cost visibility.</p>
+          <p style={{ margin: '5px 0 0', color: '#64748b', fontSize: 13 }}>Sales, tax and recipe-cost visibility.</p>
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'end', flexWrap: 'wrap' }}>
           <label style={{ fontSize: 12, color: '#475569' }}>From<input type="date" value={from} onChange={(e) => setFrom(e.target.value)} style={{ display: 'block', padding: 7, border: '1px solid #cbd5e1', borderRadius: 6 }} /></label>

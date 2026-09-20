@@ -65,7 +65,7 @@ router.put('/:id', async (req, res) => {
 });
 
 // @route   PUT /api/tables/transfer/:fromId/:toId
-// @desc    Petpooja Table Transfer: Shift active order from one table to another
+// @desc    Table transfer: Shift active order from one table to another
 router.put('/transfer/:fromId/:toId', async (req, res) => {
   try {
     const { fromId, toId } = req.params;

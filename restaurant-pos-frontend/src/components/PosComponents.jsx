@@ -49,7 +49,7 @@ export function VegNonVegBadge({ type = 'veg', size = 16 }) {
 }
 
 // ---------------------------------------------------------------------------
-// 2. Petpooja Table Card with Live Timer, Running Amount & Direct Actions
+// 2. Table Card with Live Timer, Running Amount & Direct Actions
 // ---------------------------------------------------------------------------
 export function TableCard({
   table,
@@ -330,7 +330,7 @@ export function TableCard({
 }
 
 // ---------------------------------------------------------------------------
-// 3. Petpooja Quick Settle Modal (Cash Change Calculator + Dynamic UPI QR)
+// 3. Quick Settle Modal (Cash Change Calculator + Dynamic UPI QR)
 // ---------------------------------------------------------------------------
 export function QuickSettleModal({
   order,
@@ -879,7 +879,7 @@ export function KeyboardShortcutsBanner() {
 
   return (
     <div style={{ backgroundColor: '#1e293b', color: '#94a3b8', padding: '6px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '11px' }}>
-      <span style={{ fontWeight: '600', color: '#e2e8f0' }}>⚡ Petpooja Speed Billing Shortcuts:</span>
+      <span style={{ fontWeight: '600', color: '#e2e8f0' }}>⚡ Fast Billing Shortcuts:</span>
       <div style={{ display: 'flex', gap: '12px' }}>
         {shortcuts.map(s => (
           <span key={s.key}>

@@ -469,7 +469,7 @@ const seedData = async () => {
       }
     ]);
 
-    // Sample Petpooja Tables across Floors
+    // Sample tables across floors
     await Table.insertMany([
       // Veg Floor Tables
       { tableNo: 1, tableNumber: 1, capacity: 2, floor: 'Veg Floor', type: 'Cafe', status: 'available' },
@@ -482,7 +482,7 @@ const seedData = async () => {
       { tableNo: 102, tableNumber: 102, capacity: 20, floor: 'Birthday Party Zone', type: 'Birthday Zone', status: 'available' }
     ]);
 
-    console.log('✅ Petpooja POS Data Successfully Seeded!');
+    console.log('✅ POS data successfully seeded!');
     process.exit(0);
   } catch (error) {
     console.error('❌ Seeding Error:', error);
