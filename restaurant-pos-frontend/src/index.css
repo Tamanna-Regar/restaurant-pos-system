@@ -1,0 +1,676 @@
+@import "tailwindcss";
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+html,
+body {
+  overflow: hidden;
+}
+
+body {
+  font-family: Inter, system-ui, sans-serif;
+  line-height: 1.35;
+  color: #0f172a;
+  background: #f8fafc;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+p {
+  margin-top: 0;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button {
+  transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease,
+    box-shadow 140ms ease, transform 140ms ease, opacity 140ms ease;
+}
+
+button:not(:disabled):hover {
+  filter: brightness(0.98);
+}
+
+button:not(:disabled):active {
+  transform: translateY(1px);
+}
+
+button:disabled {
+  cursor: not-allowed !important;
+  opacity: 0.6;
+}
+
+input,
+select,
+textarea {
+  transition: border-color 140ms ease, box-shadow 140ms ease, background-color 140ms ease;
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: #94a3b8;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  border-color: #fb6a3b !important;
+  box-shadow: 0 0 0 3px rgba(252, 79, 26, 0.12);
+  outline: none;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+::selection {
+  background: #fed7aa;
+  color: #7c2d12;
+}
+
+@media (max-width: 900px) {
+  html,
+  body {
+    overflow: auto;
+  }
+
+  #root {
+    min-height: 100%;
+    height: auto;
+  }
+}
+
+/* Staff payroll keeps wide financial data readable without forcing the whole
+   POS shell to overflow horizontally. */
+.staff-payroll-page {
+  min-width: 0;
+  overflow-x: hidden;
+}
+
+.inventory-page,
+.inventory-shell,
+.inventory-main-grid,
+.inventory-list-column,
+.inventory-side-column {
+  min-width: 0;
+}
+
+.inventory-table-card {
+  max-width: 100%;
+}
+
+.inventory-table-card > div {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+.inventory-table-card table {
+  min-width: 760px;
+}
+
+.inventory-search-bar input {
+  min-width: 0;
+}
+
+@media (max-width: 1180px) {
+  .inventory-page {
+    padding: 20px !important;
+  }
+
+  .inventory-main-grid {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  .inventory-side-column {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: start;
+  }
+}
+
+@media (max-width: 760px) {
+  .inventory-page {
+    padding: 14px !important;
+  }
+
+  .inventory-header {
+    padding: 18px !important;
+    align-items: flex-start !important;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .inventory-header button {
+    width: 100%;
+  }
+
+  .inventory-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 10px !important;
+  }
+
+  .inventory-search-bar {
+    align-items: stretch !important;
+    flex-direction: column;
+  }
+
+  .inventory-search-bar > div {
+    justify-content: space-between;
+  }
+
+  .inventory-side-column {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 480px) {
+  .inventory-metrics {
+    grid-template-columns: 1fr !important;
+  }
+}
+
+.staff-payroll-header-grid,
+.staff-payroll-stats-grid {
+  min-width: 0;
+}
+
+.staff-payroll-header-row {
+  gap: 18px;
+}
+
+.staff-payroll-header-actions {
+  flex-shrink: 0;
+}
+
+.staff-payroll-table-scroll {
+  width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.staff-payroll-table-scroll table {
+  min-width: 980px;
+}
+
+.staff-payroll-table-card th,
+.staff-payroll-table-card td {
+  white-space: nowrap;
+}
+
+.staff-payroll-inspector {
+  min-width: 0;
+}
+
+/* Keep the POS shell constrained to the viewport at every desktop breakpoint.
+   Child modules can still scroll their own wide tables without moving the shell. */
+.pos-shell {
+  width: 100%;
+  max-width: 100vw;
+  min-width: 0;
+}
+
+.pos-sidebar {
+  min-width: 0;
+  flex: 0 0 260px;
+  overflow: hidden;
+}
+
+.pos-main {
+  min-width: 0;
+  max-width: calc(100vw - 260px);
+  overflow-x: hidden;
+}
+
+.pos-main > * {
+  min-width: 0;
+  max-width: 100%;
+  width: 100%;
+}
+
+.table-floor-grid,
+.dashboard-insights-grid {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.table-floor-grid > *,
+.dashboard-insights-grid > * {
+  min-width: 0;
+}
+
+@media (max-width: 1100px) {
+  .pos-sidebar {
+    flex-basis: 220px;
+    width: 220px !important;
+  }
+
+  .pos-main {
+    max-width: calc(100vw - 220px);
+  }
+}
+
+@media (max-width: 760px) {
+  .pos-shell {
+    height: auto !important;
+    min-height: 100vh;
+    overflow: visible !important;
+    flex-direction: column !important;
+  }
+
+  .pos-sidebar {
+    width: 100% !important;
+    flex-basis: auto;
+    height: auto !important;
+    max-height: none !important;
+    position: relative !important;
+  }
+
+  .pos-main {
+    width: 100%;
+    max-width: 100%;
+    min-height: 70vh;
+    overflow: visible !important;
+  }
+}
+
+@media (max-width: 1100px) {
+  .staff-payroll-header-grid {
+    grid-template-columns: 1fr !important;
+  }
+
+  .staff-payroll-stats-grid {
+    grid-template-columns: repeat(3, minmax(160px, 1fr)) !important;
+  }
+}
+
+@media (max-width: 760px) {
+  .staff-payroll-page {
+    padding: 14px !important;
+  }
+
+  .staff-payroll-header-row {
+    align-items: flex-start !important;
+    flex-direction: column !important;
+  }
+
+  .staff-payroll-header-actions {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .staff-payroll-header-actions button {
+    flex: 1;
+  }
+
+  .staff-payroll-stats-grid {
+    grid-template-columns: repeat(2, minmax(140px, 1fr)) !important;
+  }
+
+  .staff-payroll-inspector {
+    grid-template-columns: 1fr !important;
+    gap: 20px !important;
+    padding: 18px !important;
+  }
+}
+
+@media (max-width: 480px) {
+  .staff-payroll-stats-grid {
+    grid-template-columns: 1fr !important;
+  }
+
+  .staff-payroll-toolbar button {
+    width: 100%;
+  }
+}
+
+@media (max-width: 640px) {
+  body {
+    font-size: 14px;
+  }
+
+  /* The admin panel is rendered inside the POS content column. Keep its own
+     scroll context so long tables, users and settings remain reachable. */
+  .admin-dashboard {
+    min-width: 0;
+  }
+
+  .login-page {
+    min-height: 100vh;
+  }
+
+  .pos-shell {
+    width: 100%;
+    max-width: 100vw;
+    min-width: 0;
+  }
+
+  .pos-sidebar {
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  .pos-main {
+    min-width: 0;
+    width: auto;
+    max-width: none;
+    overflow-x: hidden;
+    overflow-y: auto;
+  }
+
+  .pos-main > * {
+    min-width: 0;
+    max-width: 100%;
+    width: 100%;
+  }
+
+  .table-floor-grid,
+  .dashboard-insights-grid {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .table-floor-grid > *,
+  .dashboard-insights-grid > * {
+    min-width: 0;
+  }
+
+  .analytics-heading-row {
+    min-width: 0;
+  }
+
+  .analytics-period-controls {
+    justify-content: flex-end;
+  }
+
+  @media (max-width: 640px) {
+    .analytics-heading-row {
+      flex-direction: column;
+    }
+
+    .analytics-period-controls {
+      width: 100%;
+      justify-content: stretch;
+    }
+
+    .analytics-period-controls button {
+      flex: 1;
+    }
+  }
+
+  @media (max-width: 1100px) {
+    .pos-sidebar {
+      width: 220px !important;
+    }
+
+    .pos-main {
+      max-width: none;
+    }
+  }
+
+  @media (max-width: 760px) {
+    .pos-shell {
+      height: auto !important;
+      min-height: 100vh;
+      overflow: visible !important;
+      flex-direction: column !important;
+    }
+
+    .pos-sidebar {
+      width: 100% !important;
+      height: auto !important;
+      max-height: none !important;
+      position: relative !important;
+    }
+
+    .pos-sidebar > div:nth-last-child(1) {
+      max-height: 280px;
+    }
+
+    .pos-main {
+      width: 100%;
+      max-width: 100%;
+      min-height: 70vh;
+      overflow: visible !important;
+    }
+  }
+
+  .login-page__content {
+    overflow-y: auto;
+  }
+
+  @media (max-width: 800px) {
+    .login-page {
+      height: auto !important;
+      min-height: 100vh;
+      overflow-y: auto !important;
+    }
+
+    .login-page__hero {
+      display: none !important;
+    }
+
+    .login-page__content {
+      min-height: 100vh;
+      padding: 22px 16px !important;
+      align-items: flex-start !important;
+      padding-top: 8vh !important;
+    }
+  }
+
+  @media (max-width: 480px) {
+    .login-page__content {
+      padding: 24px 12px !important;
+    }
+  }
+
+  .admin-dashboard__content input,
+  .admin-dashboard__content select,
+  .admin-dashboard__content textarea {
+    width: 100%;
+    min-height: 40px;
+    margin-top: 6px;
+    padding: 9px 11px;
+    border: 1px solid #d1d5db;
+    border-radius: 8px;
+    background: #fff;
+    color: #111827;
+  }
+
+  .admin-dashboard__content textarea {
+    min-height: 88px;
+    resize: vertical;
+  }
+
+  .admin-dashboard__content label {
+    display: block;
+    color: #374151;
+    font-size: 12px;
+    font-weight: 700;
+  }
+
+  .admin-dashboard__content h2,
+  .admin-dashboard__content h3 {
+    color: #111827;
+  }
+
+  .admin-dashboard__content small {
+    display: block;
+    margin-top: 4px;
+    color: #6b7280;
+    font-size: 11px;
+  }
+
+  .admin-dashboard__content button {
+    min-height: 38px;
+    white-space: nowrap;
+  }
+
+  @media (max-width: 900px) {
+    .admin-dashboard__header,
+    .admin-dashboard__content {
+      padding-left: 16px !important;
+      padding-right: 16px !important;
+    }
+
+    .admin-dashboard__nav {
+      padding-left: 16px !important;
+      padding-right: 16px !important;
+    }
+
+    .admin-dashboard__content {
+      min-height: calc(100% - 120px) !important;
+    }
+  }
+
+  @media (max-width: 640px) {
+    .admin-dashboard__header {
+      align-items: flex-start !important;
+    }
+
+    .admin-dashboard__header .admin-dashboard__header-actions {
+      width: 100%;
+    }
+
+    .admin-dashboard__header button {
+      flex: 1;
+    }
+
+    .admin-dashboard__nav button {
+      padding: 12px 13px !important;
+      font-size: 12px !important;
+    }
+
+    .admin-dashboard__content {
+      padding-top: 18px !important;
+    }
+  }
+
+  /* Keep the HR screen controls visually consistent despite its legacy inline styles. */
+  .staff-payroll-page button {
+    min-height: 38px;
+    padding: 9px 14px !important;
+    border-radius: 8px !important;
+    font-size: 12px !important;
+    line-height: 1.2;
+    white-space: nowrap;
+  }
+
+  .staff-payroll-page table button {
+    min-height: 30px;
+    padding: 6px 10px !important;
+    font-size: 11px !important;
+  }
+
+  .staff-payroll-page input,
+  .staff-payroll-page select,
+  .staff-payroll-page textarea {
+    min-height: 38px;
+    border-radius: 8px !important;
+  }
+
+  @media (max-width: 1050px) {
+    .staff-payroll-page {
+      padding: 16px !important;
+    }
+
+    .staff-payroll-shell > div:first-child {
+      grid-template-columns: 1fr !important;
+    }
+
+    .staff-payroll-shell > div:nth-child(2) {
+      grid-template-columns: repeat(2, minmax(160px, 1fr)) !important;
+    }
+  }
+
+  @media (max-width: 640px) {
+    .staff-payroll-shell > div:nth-child(2) {
+      grid-template-columns: 1fr !important;
+    }
+
+    .staff-payroll-shell > div:first-child > div:first-child > div:first-child {
+      align-items: flex-start !important;
+      flex-direction: column !important;
+      gap: 14px !important;
+    }
+
+    .staff-payroll-shell > div:first-child > div:first-child > div:first-child > div:last-child {
+      width: 100%;
+      flex-wrap: wrap;
+    }
+
+    .staff-payroll-shell > div:first-child > div:first-child > div:first-child > div:last-child button {
+      flex: 1;
+    }
+  }
+
+  table {
+    min-width: 620px;
+  }
+
+  @media print {
+    body {
+      overflow: visible !important;
+      background: #fff !important;
+    }
+
+    .pos-sidebar,
+    .pos-main > :not(.reports-costing-page):not(.payment-ledger-page) {
+      display: none !important;
+    }
+
+    .reports-costing-page,
+    .payment-ledger-page {
+      display: block !important;
+      overflow: visible !important;
+      padding: 12px !important;
+    }
+
+    .payment-ledger-page .payment-ledger-table-wrap {
+      overflow: visible !important;
+    }
+
+    .payment-ledger-page .payment-ledger-table-wrap > div {
+      min-width: 0 !important;
+    }
+
+    .payment-ledger-page button {
+      display: none !important;
+    }
+  }
+}
