@@ -18,7 +18,16 @@ const summarizeDay = async (businessDate, openingCash = 0) => {
       { $group: { _id: '$paymentMode', amount: { $sum: '$grandTotal' }, count: { $sum: 1 } } }
     ]),
     Expense.aggregate([
-      { $match: { createdAt: dateRange(businessDate) } },
+      { 
+        $match: { 
+          createdAt: dateRange(businessDate),
+          $or: [
+            { paymentMode: 'Cash' },
+            { paymentMode: { $exists: false } },
+            { paymentMode: null }
+          ]
+        } 
+      },
       { $group: { _id: null, amount: { $sum: '$amount' } } }
     ])
   ]);
@@ -43,7 +52,7 @@ router.get('/', async (req, res) => {
   }
 });
 
-router.get('/current', async (req, res) => {
+router.get(['/current', '/today'], async (req, res) => {
   try {
     const businessDate = String(req.query.date || new Date().toISOString().slice(0, 10));
     const record = await DayEnd.findOne({ businessDate });

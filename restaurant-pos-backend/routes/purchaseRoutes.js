@@ -1,4 +1,6 @@
 const express = require('express');
+const fs = require('fs');
+const path = require('path');
 const PurchaseOrder = require('../models/PurchaseOrder');
 const Ingredient = require('../models/Ingredient');
 const InventoryLedger = require('../models/InventoryLedger');
@@ -11,6 +13,38 @@ router.get('/', async (req, res) => {
   try {
     const orders = await PurchaseOrder.find().sort({ createdAt: -1 });
     res.json({ success: true, data: orders });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+router.post('/auto-generate', async (req, res) => {
+  try {
+    const ingredients = await Ingredient.find({ $expr: { $lt: ["$currentStock", "$minStockAlert"] } });
+    if (!ingredients.length) {
+      return res.json({ success: true, message: 'No low stock items found.', count: 0 });
+    }
+
+    const generatedOrders = [];
+    for (const item of ingredients) {
+      const orderQty = item.minStockAlert ? (item.minStockAlert * 2) : 10;
+      const payload = {
+        supplierName: 'Default Supplier',
+        ingredientId: item._id,
+        itemName: item.name,
+        category: 'Grocery',
+        unit: item.unit || 'kg',
+        quantity: orderQty,
+        unitPrice: item.costPerUnit || 1,
+        totalAmount: orderQty * (item.costPerUnit || 1),
+        status: 'Pending',
+        createdBy: req.user?.name || 'System Auto-Gen'
+      };
+      const order = await PurchaseOrder.create(payload);
+      generatedOrders.push(order);
+    }
+
+    res.json({ success: true, message: `Auto-generated ${generatedOrders.length} purchase orders!`, count: generatedOrders.length });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -69,29 +103,47 @@ router.patch('/:id/status', async (req, res) => {
   try {
     const existing = await PurchaseOrder.findById(req.params.id);
     if (!existing) return res.status(404).json({ success: false, message: 'Purchase order not found' });
+    let priceWarning = false;
     const nextStatus = String(req.body.status || '');
-    if (!['Pending', 'Approved', 'Received', 'Cancelled'].includes(nextStatus)) {
+    if (!['Pending', 'Approved', 'Partially Received', 'Received', 'Cancelled'].includes(nextStatus)) {
       return res.status(400).json({ success: false, message: 'Invalid purchase order status' });
     }
-    if (existing.status === 'Received' && nextStatus !== 'Received') {
-      return res.status(409).json({ success: false, message: 'A received purchase order cannot be moved backwards' });
+    if (existing.status === 'Received') {
+      return res.status(409).json({ success: false, message: 'A fully received purchase order cannot be changed' });
     }
-    if (nextStatus === 'Received' && existing.status !== 'Received') {
+    
+    if (nextStatus === 'Received' || nextStatus === 'Partially Received') {
       const ingredient = existing.ingredientId
         ? await Ingredient.findById(existing.ingredientId)
         : await Ingredient.findOne({ name: { $regex: `^${existing.itemName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, $options: 'i' } });
       if (!ingredient) return res.status(400).json({ success: false, message: 'Link this purchase order to an ingredient before receiving it' });
-      ingredient.currentStock += existing.quantity;
+      
+      const receiveQty = req.body.receivedQuantity !== undefined ? Number(req.body.receivedQuantity) : (existing.quantity - existing.receivedQuantity);
+      if (receiveQty <= 0) return res.status(400).json({ success: false, message: 'Received quantity must be greater than zero' });
+      if (existing.receivedQuantity + receiveQty > existing.quantity) {
+        return res.status(400).json({ success: false, message: 'Cannot receive more than the ordered quantity' });
+      }
+
+      if (ingredient.costPerUnit > 0 && existing.unitPrice > (ingredient.costPerUnit * 1.10)) {
+        priceWarning = true;
+      }
+      
+      const previousStock = Number(ingredient.currentStock || 0);
+      const previousCost = Number(ingredient.costPerUnit || 0);
+
+      ingredient.currentStock += receiveQty;
+      ingredient.costPerUnit = Number(((previousStock * previousCost + receiveQty * existing.unitPrice) / ingredient.currentStock).toFixed(4));
+      
       await ingredient.save();
-      await InventoryLedger.create({ ingredientId: ingredient._id, type: 'purchase', quantity: existing.quantity, balanceAfter: ingredient.currentStock, referenceType: 'PurchaseOrder', referenceId: String(existing._id), note: `Received from ${existing.supplierName}`, createdBy: req.user?.name || 'System' });
+      await InventoryLedger.create({ ingredientId: ingredient._id, type: 'purchase', quantity: receiveQty, balanceAfter: ingredient.currentStock, referenceType: 'PurchaseOrder', referenceId: String(existing._id), note: `Received ${receiveQty} from ${existing.supplierName}`, createdBy: req.user?.name || 'System' });
       await InventoryBatch.create({
         ingredientId: ingredient._id,
         purchaseOrderId: existing._id,
         itemName: existing.itemName,
         supplierName: existing.supplierName,
         batchNo: existing.batchNo || `PO-${String(existing._id).slice(-6).toUpperCase()}`,
-        quantityReceived: existing.quantity,
-        quantityRemaining: existing.quantity,
+        quantityReceived: receiveQty,
+        quantityRemaining: receiveQty,
         unit: existing.unit,
         unitCost: existing.unitPrice,
         expiryDate: existing.expiryDate,
@@ -99,12 +151,48 @@ router.patch('/:id/status', async (req, res) => {
       });
       existing.ingredientId = ingredient._id;
       existing.receivedAt = new Date();
+      existing.receivedQuantity += receiveQty;
+      
+      // Auto upgrade status to fully received if completed
+      if (existing.receivedQuantity >= existing.quantity) {
+        existing.status = 'Received';
+      } else {
+        existing.status = 'Partially Received';
+      }
+    } else {
+      existing.status = nextStatus;
     }
-    existing.status = nextStatus;
     const order = await existing.save();
-    res.json({ success: true, data: order });
+    res.json({ success: true, data: order, priceWarning });
   } catch (error) {
     res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+router.post('/:id/upload-bill', async (req, res) => {
+  try {
+    const { base64Data, filename } = req.body;
+    if (!base64Data) return res.status(400).json({ success: false, message: 'Base64 data required' });
+    
+    const existing = await PurchaseOrder.findById(req.params.id);
+    if (!existing) return res.status(404).json({ success: false, message: 'Purchase order not found' });
+    
+    const uploadsDir = path.join(__dirname, '..', 'public', 'uploads');
+    if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+    
+    const ext = filename ? path.extname(filename) : '.jpg';
+    const safeFilename = `PO-${existing._id}-${Date.now()}${ext}`;
+    const filePath = path.join(uploadsDir, safeFilename);
+    
+    const base64DataPart = base64Data.replace(/^data:[a-zA-Z0-9/+-]+;base64,/, '');
+    fs.writeFileSync(filePath, base64DataPart, 'base64');
+    
+    existing.invoiceBillUrl = `/uploads/${safeFilename}`;
+    await existing.save();
+    
+    res.json({ success: true, message: 'Bill uploaded successfully', url: existing.invoiceBillUrl });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
   }
 });
 
@@ -144,8 +232,9 @@ router.post('/receive', async (req, res) => {
     const previousCost = Number(ingredient.costPerUnit || 0);
     ingredient.currentStock = previousStock + quantity;
     ingredient.costPerUnit = Number(((previousStock * previousCost + quantity * unitPrice) / ingredient.currentStock).toFixed(4));
+    const targetLocation = String(body.location || 'Main Store').trim();
     const stockByLocation = Object.fromEntries(ingredient.stockByLocation || []);
-    stockByLocation['Main Store'] = Number((Number(stockByLocation['Main Store'] || 0) + quantity).toFixed(4));
+    stockByLocation[targetLocation] = Number((Number(stockByLocation[targetLocation] || 0) + quantity).toFixed(4));
     ingredient.stockByLocation = stockByLocation;
 
     const order = await PurchaseOrder.create({

@@ -2,6 +2,7 @@ const express = require('express');
 const Recipe = require('../models/Recipe');
 const Ingredient = require('../models/Ingredient');
 const MenuItem = require('../models/Item');
+const { logAudit } = require('../utils/auditLogger');
 
 const router = express.Router();
 
@@ -16,11 +17,12 @@ router.get('/', async (req, res) => {
 
 router.post('/', async (req, res) => {
   try {
-    const { itemId, ingredients = [] } = req.body;
+    const { itemId, ingredients = [], instructions = '', portionSize = '1 Serving' } = req.body;
     if (!itemId || !Array.isArray(ingredients) || ingredients.length === 0) {
       return res.status(400).json({ success: false, message: 'itemId and ingredients are required' });
     }
-    if (!await MenuItem.exists({ _id: itemId })) {
+    const menuItem = await MenuItem.findById(itemId);
+    if (!menuItem) {
       return res.status(400).json({ success: false, message: 'Menu item not found' });
     }
     const normalizedIngredients = ingredients.map((item) => ({
@@ -36,9 +38,25 @@ router.post('/', async (req, res) => {
     }
     const recipe = await Recipe.findOneAndUpdate(
       { itemId },
-      { itemId, ingredients: normalizedIngredients },
+      { itemId, ingredients: normalizedIngredients, instructions: String(instructions || '').trim(), portionSize: String(portionSize || '1 Serving').trim() },
       { upsert: true, new: true, runValidators: true }
     );
+
+    await logAudit({
+      action: 'RECIPE_UPDATE',
+      resource: 'Recipe',
+      resourceId: String(itemId),
+      user: req.user,
+      metadata: {
+        dishName: menuItem.name,
+        category: menuItem.category,
+        ingredientCount: normalizedIngredients.length,
+        portionSize: recipe.portionSize,
+        instructions: recipe.instructions
+      },
+      req
+    });
+
     res.status(201).json({ success: true, data: recipe });
   } catch (error) {
     res.status(400).json({ success: false, message: error.message });
@@ -72,7 +90,9 @@ router.get('/cost/:itemId', async (req, res) => {
         cost: Number(cost.toFixed(2)),
         sellingPrice,
         margin: Number((sellingPrice - cost).toFixed(2)),
-        foodCostPercent: sellingPrice > 0 ? Number(((cost / sellingPrice) * 100).toFixed(2)) : null
+        foodCostPercent: sellingPrice > 0 ? Number(((cost / sellingPrice) * 100).toFixed(2)) : null,
+        instructions: recipe.instructions || '',
+        portionSize: recipe.portionSize || '1 Serving'
       }
     });
   } catch (error) {
@@ -84,6 +104,16 @@ router.delete('/:id', async (req, res) => {
   try {
     const deleted = await Recipe.findByIdAndDelete(req.params.id);
     if (!deleted) return res.status(404).json({ success: false, message: 'Recipe not found' });
+
+    await logAudit({
+      action: 'RECIPE_DELETE',
+      resource: 'Recipe',
+      resourceId: String(req.params.id),
+      user: req.user,
+      metadata: { itemId: deleted.itemId },
+      req
+    });
+
     res.json({ success: true, message: 'Recipe deleted successfully' });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });

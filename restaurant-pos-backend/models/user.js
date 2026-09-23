@@ -17,7 +17,11 @@ const userSchema = new mongoose.Schema({
     default: {}
   },
   passwordResetToken: { type: String, default: null },
-  passwordResetExpires: { type: Date, default: null }
+  passwordResetExpires: { type: Date, default: null },
+  isTwoFactorEnabled: { type: Boolean, default: false },
+  twoFactorSecret: { type: String, default: null },
+  twoFactorTempSecret: { type: String, default: null },
+  twoFactorRecoveryCodes: { type: [String], default: [] }
 }, { timestamps: true });
 
 module.exports = mongoose.model('User', userSchema);

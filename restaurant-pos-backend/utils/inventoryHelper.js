@@ -26,8 +26,37 @@ const consumeIngredientStock = async (ingredientId, quantity, referenceId, note)
   return { remaining, allocations };
 };
 
+// Validate inventory stock without deducting
+const validateStockForOrder = async (orderItems) => {
+  const requiredByIngredient = new Map();
+  const missingRecipes = [];
+  
+  for (const item of orderItems || []) {
+    const recipe = await Recipe.findOne({ itemId: item.itemId || item._id }).lean();
+    if (!recipe || !recipe.ingredients || recipe.ingredients.length === 0) {
+      continue; // Skip items without recipes gracefully (e.g. packages, decor, or items not yet mapped)
+    }
+    for (const ing of recipe.ingredients) {
+      const required = Number(ing.quantityRequired || 0) * Number(item.quantity || 1);
+      requiredByIngredient.set(String(ing.ingredientId), (requiredByIngredient.get(String(ing.ingredientId)) || 0) + required);
+    }
+  }
+  
+  for (const [ingredientId, required] of requiredByIngredient) {
+    const ingredient = await Ingredient.findById(ingredientId).select('name currentStock minStockAlert');
+    if (!ingredient) throw new Error(`Ingredient ${ingredientId} not found while validating stock`);
+    if (Number(ingredient.currentStock) < required) {
+      throw new Error(`Insufficient stock for ${ingredient.name}. Required: ${required}, available: ${ingredient.currentStock}`);
+    }
+  }
+  
+  return {};
+};
+
 // Deduct inventory stock when order is placed or completed & update menu availability
 const deductStockForOrder = async (orderItems, referenceId = '') => {
+  // We can skip validation here if it's already done, but it's safer to keep it or just trust the earlier call.
+  // We'll leave it as is to avoid breaking anything else, or just rely on the new validateStockForOrder.
   const requiredByIngredient = new Map();
   for (const item of orderItems || []) {
     const recipe = await Recipe.findOne({ itemId: item.itemId || item._id }).lean();
@@ -126,4 +155,35 @@ const restoreStockForOrder = async (orderItems, referenceId, createdBy = 'Refund
   }
 };
 
-module.exports = { deductStockForOrder, restoreStockForOrder };
+const restoreStockForItems = async (items, referenceId, createdBy = 'Void Item') => {
+  for (const item of items || []) {
+    const recipe = await Recipe.findOne({ itemId: item.itemId || item.originalId || item._id });
+    if (!recipe) continue;
+    for (const ing of recipe.ingredients) {
+      const quantity = Number(ing.quantityRequired || 0) * Number(item.quantity || 1);
+      if (!quantity) continue;
+      const updatedIngredient = await Ingredient.findByIdAndUpdate(
+        ing.ingredientId,
+        { $inc: { currentStock: quantity } },
+        { new: true }
+      );
+      if (!updatedIngredient) continue;
+      await InventoryLedger.create({
+        ingredientId: ing.ingredientId,
+        type: 'return',
+        quantity,
+        balanceAfter: updatedIngredient.currentStock,
+        referenceType: 'Void Item',
+        referenceId: String(referenceId || ''),
+        note: `Stock restored for cancelled item ${item.name || item.itemId}`,
+        createdBy
+      });
+      if (updatedIngredient.currentStock > updatedIngredient.minStockAlert) {
+        const recipes = await Recipe.find({ 'ingredients.ingredientId': ing.ingredientId }).select('itemId');
+        await MenuItem.updateMany({ _id: { $in: recipes.map((r) => r.itemId) } }, { $set: { isAvailable: true } });
+      }
+    }
+  }
+};
+
+module.exports = { deductStockForOrder, restoreStockForOrder, restoreStockForItems, validateStockForOrder };

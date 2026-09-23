@@ -8,12 +8,14 @@ const Ingredient = require('../models/Ingredient');
 const { resolveModifiers } = require('../utils/modifierHelper');
 
 // ---- INTEGRATED HELPERS ----
-const { deductStockForOrder } = require('../utils/inventoryHelper');
+const { deductStockForOrder, restoreStockForOrder, restoreStockForItems, validateStockForOrder } = require('../utils/inventoryHelper');
 const { updateCustomerCRM } = require('../utils/crmHelper');
 const { sendWhatsAppBill } = require('../utils/whatsappHelper'); // WhatsApp Bill Integration Helper
 const { queueOrderCommunications } = require('../utils/communicationHelper');
 const { getNextInvoiceNumber } = require('../utils/invoiceHelper');
 const { getBranchScope, canAccessBranch } = require('../utils/branchScope');
+const { logAudit } = require('../utils/auditLogger');
+const { generateInvoicePDF } = require('../utils/pdfInvoiceGenerator');
 
 const emitLowStockAlerts = async (io) => {
   if (!io) return;
@@ -153,6 +155,9 @@ router.post(['/', '/create'], async (req, res) => {
       }))
     };
 
+    // ---- INVENTORY TRIGGER: Validate stock before placing order ----
+    await validateStockForOrder(pricedItems);
+
     const newOrder = new Order({
       branchId: req.user?.branchId || (['admin', 'manager'].includes(req.user?.role) ? (req.body.branchId || null) : null),
       tableId: (orderType === 'Dine-In' && tableId) ? tableId : null,
@@ -199,7 +204,15 @@ router.post(['/', '/create'], async (req, res) => {
     await newOrder.save();
 
     // ---- INVENTORY TRIGGER: Deduct raw material stock for KOT #1 ----
-    await deductStockForOrder(newOrder.items, newOrder._id);
+    // We already validated stock, so this should rarely fail unless concurrent orders drain it
+    try {
+      await deductStockForOrder(newOrder.items, newOrder._id);
+    } catch (stockError) {
+      // Rollback order if stock deduction fails
+      await Order.findByIdAndDelete(newOrder._id);
+      throw stockError;
+    }
+    
     await emitLowStockAlerts(req.app.get('io'));
 
     // If Dine-In, mark table as occupied and link order
@@ -210,7 +223,25 @@ router.post(['/', '/create'], async (req, res) => {
       });
     }
 
-    res.status(201).json({ success: true, data: newOrder });
+    // ---- KDS: Emit new KOT to kitchen display ----
+    const io = req.app.get('io');
+    if (io) {
+      io.emit('new-kot', {
+        orderId: newOrder._id,
+        orderType: newOrder.orderType,
+        tableId: newOrder.tableId,
+        customerName: newOrder.customerName,
+        waiterName: newOrder.waiterName,
+        kotNumber: 1,
+        punchedAt: firstKot.punchedAt,
+        items: firstKot.items,
+        priority: newOrder.priority || 'Normal',
+        celebrationOccasion: newOrder.celebrationOccasion || ''
+      });
+    }
+
+    const responsePayload = { success: true, data: newOrder };
+    res.status(201).json(responsePayload);
   } catch (error) {
     console.error('Create Order Error:', error);
     if (error?.code === 11000 && error?.keyPattern?.invoiceNumber) {
@@ -268,6 +299,9 @@ router.post('/kot/punch/:orderId', async (req, res) => {
     order.kots = Array.isArray(order.kots) ? order.kots : [];
     order.kots.push(newKot);
 
+    // ---- INVENTORY TRIGGER: Validate stock for new items ----
+    await validateStockForOrder(pricedNewItems);
+
     // Append to items
     pricedNewItems.forEach(it => {
       order.items.push({
@@ -306,12 +340,30 @@ router.post('/kot/punch/:orderId', async (req, res) => {
     await deductStockForOrder(pricedNewItems, order._id);
     await emitLowStockAlerts(req.app.get('io'));
 
+    // ---- KDS: Emit new KOT to kitchen display ----
+    const io = req.app.get('io');
+    if (io) {
+      io.emit('new-kot', {
+        orderId: order._id,
+        orderType: order.orderType,
+        tableId: order.tableId,
+        customerName: order.customerName,
+        waiterName: order.waiterName,
+        kotNumber: nextKotNumber,
+        punchedAt: newKot.punchedAt,
+        items: newKot.items,
+        priority: order.priority || 'Normal',
+        celebrationOccasion: order.celebrationOccasion || ''
+      });
+    }
+
     // Ensure table remains occupied
     if (order.tableId) {
       await Table.findByIdAndUpdate(order.tableId, { status: 'occupied' });
     }
 
-    res.json({ success: true, message: `KOT #${nextKotNumber} punched successfully!`, data: order, kot: newKot });
+    const responsePayload = { success: true, message: `KOT #${nextKotNumber} punched successfully!`, data: order, kot: newKot };
+    res.json(responsePayload);
   } catch (error) {
     console.error('Punch KOT Error:', error);
     res.status(500).json({ success: false, message: error.message });
@@ -326,6 +378,70 @@ router.get('/active', async (req, res) => {
       .populate('tableId')
       .populate('items.itemId');
     res.json({ success: true, data: allOrders });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// KDS: Fetch all active kitchen orders (not completed/cancelled/billed)
+router.get('/kds', async (req, res) => {
+  try {
+    const orders = await Order.find({
+      ...getBranchScope(req),
+      orderStatus: { $in: ['placed', 'preparing', 'ready'] }
+    })
+      .sort({ createdAt: 1 })
+      .populate('tableId', 'tableNo tableNumber floor')
+      .select('orderType orderStatus tableId customerName waiterName kots kotNumber createdAt priority celebrationOccasion');
+    res.json({ success: true, data: orders });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// KDS: Update KOT status (individual KOT within an order)
+router.patch('/kds/:orderId/kot/:kotNumber', async (req, res) => {
+  try {
+    const { status } = req.body;
+    const validStatuses = ['placed', 'preparing', 'ready', 'served'];
+    if (!validStatuses.includes(status)) {
+      return res.status(400).json({ success: false, message: `Status must be one of: ${validStatuses.join(', ')}` });
+    }
+    const order = await Order.findById(req.params.orderId);
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+
+    const kotIndex = order.kots.findIndex(k => k.kotNumber === Number(req.params.kotNumber));
+    if (kotIndex === -1) return res.status(404).json({ success: false, message: 'KOT not found' });
+
+    order.kots[kotIndex].status = status;
+
+    // If all KOTs are ready/served → mark order as ready
+    const allReady = order.kots.every(k => ['ready', 'served'].includes(k.status));
+    if (allReady && order.orderStatus === 'preparing') {
+      order.orderStatus = 'ready';
+      order.statusHistory = order.statusHistory || [];
+      order.statusHistory.push({ status: 'ready', timestamp: new Date(), updatedBy: 'Kitchen' });
+    }
+    if (status === 'preparing' && order.orderStatus === 'placed') {
+      order.orderStatus = 'preparing';
+      order.statusHistory = order.statusHistory || [];
+      order.statusHistory.push({ status: 'preparing', timestamp: new Date(), updatedBy: 'Kitchen' });
+    }
+
+    await order.save();
+
+    // Emit to all clients
+    const io = req.app.get('io');
+    if (io) {
+      io.emit('kot-status-update', {
+        orderId: order._id,
+        kotNumber: Number(req.params.kotNumber),
+        kotStatus: status,
+        orderStatus: order.orderStatus
+      });
+    }
+
+    res.json({ success: true, data: order });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -360,6 +476,20 @@ router.put('/status/:orderId', async (req, res) => {
       order.cancellationReason = String(req.body.reason || 'Order cancelled').trim().slice(0, 250);
       order.cancelledBy = req.user?.name || updatedBy || 'Manager';
       order.cancelledAt = new Date();
+
+      await logAudit({
+        action: 'ORDER_CANCELLED',
+        resource: 'Order',
+        resourceId: String(order._id),
+        user: req.user,
+        metadata: {
+          orderNumber: order.orderNumber,
+          tableNo: order.tableNo,
+          grandTotal: order.grandTotal,
+          reason: order.cancellationReason
+        },
+        req
+      });
     }
 
     order.orderStatus = status;
@@ -382,6 +512,19 @@ router.put('/status/:orderId', async (req, res) => {
       }
     }
 
+    // ---- KDS & Waiter: Emit status change to all screens ----
+    const io = req.app.get('io');
+    if (io) {
+      io.emit('kot-status-update', {
+        orderId: order._id,
+        orderStatus: order.orderStatus,
+        tableId: order.tableId,
+        updatedBy: updatedBy || 'Staff'
+      });
+      io.emit('table-updated', { tableId: order.tableId, status });
+      io.emit('order-updated', { orderId: order._id, status, order });
+    }
+
     res.json({ success: true, data: order });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -399,7 +542,7 @@ router.put('/pay/:orderId', async (req, res) => {
       return res.json({ success: true, message: 'Order payment was already settled', order });
     }
 
-    const supportedPaymentModes = ['Cash', 'PhonePe', 'QR', 'Online', 'UPI', 'Card', 'Credit/Debit Card', 'QR Code', 'UPI/Online', 'Split'];
+    const supportedPaymentModes = ['Cash', 'Razorpay', 'PhonePe', 'QR', 'Online', 'UPI', 'Card', 'Credit/Debit Card', 'QR Code', 'UPI/Online', 'Split'];
     const normalizedPaymentMode = paymentMode || order.paymentMode || 'Cash';
     if (!supportedPaymentModes.includes(normalizedPaymentMode)) {
       return res.status(400).json({ success: false, message: `Unsupported payment mode: ${normalizedPaymentMode}` });
@@ -467,9 +610,18 @@ router.put('/pay/:orderId', async (req, res) => {
       await queueOrderCommunications(order);
     }
 
-    // Free the table
+    // Free the primary table and any merged secondary tables
     if (order.tableId) {
-      await Table.findByIdAndUpdate(order.tableId, { status: 'available', currentOrderId: null });
+      await Table.updateMany(
+        { $or: [{ _id: order.tableId }, { mergedWith: order.tableId }] },
+        { status: 'available', currentOrderId: null, mergedWith: null, isMerged: false }
+      );
+      const primaryTable = await Table.findById(order.tableId);
+      if (primaryTable?.mergedWith) {
+        await Table.findByIdAndUpdate(primaryTable.mergedWith, {
+          status: 'available', currentOrderId: null, mergedWith: null, isMerged: false
+        });
+      }
     }
 
     // Record into Payments collection
@@ -506,7 +658,7 @@ router.put('/pay/:orderId', async (req, res) => {
 // 6. Update Individual Item Status in KOT
 router.put('/:orderId/item-status', async (req, res) => {
   try {
-    const { kotNumber, itemId, status } = req.body;
+    const { kotNumber, itemId, status, chef } = req.body;
     const { orderId } = req.params;
 
     if (!['placed', 'preparing', 'ready', 'served', 'cancelled'].includes(status)) {
@@ -517,6 +669,7 @@ router.put('/:orderId/item-status', async (req, res) => {
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
 
     let foundItem = null;
+    let prevStatus = null;
 
     // Find and update item inside specific KOT array
     if (order.kots && order.kots.length > 0) {
@@ -524,12 +677,88 @@ router.put('/:orderId/item-status', async (req, res) => {
       if (kot && kot.items) {
         foundItem = kot.items.find(i => String(i.itemId) === String(itemId) || String(i._id) === String(itemId));
         if (foundItem) {
+          prevStatus = foundItem.itemStatus || 'placed';
           foundItem.itemStatus = status;
         }
       }
     }
 
+    // Update in order.items matching item
+    if (order.items && order.items.length > 0) {
+      const mainItem = order.items.find(i =>
+        (Number(kotNumber) ? i.kotNumber === Number(kotNumber) : true) &&
+        (String(i.itemId) === String(itemId) || String(i._id) === String(itemId))
+      );
+      if (mainItem) {
+        mainItem.itemStatus = status;
+      }
+    }
+
+    // If item was cancelled and was not already cancelled: restore stock and re-calculate totals
+    if (status === 'cancelled' && prevStatus !== 'cancelled' && foundItem) {
+      try {
+        await restoreStockForItems([foundItem], order._id, req.user?.name || chef || 'Void Item');
+      } catch (err) {
+        console.error('Failed to restore stock for voided item:', err);
+      }
+
+      // Re-calculate totals excluding cancelled items
+      const activeItems = (order.items || []).filter(i => i.itemStatus !== 'cancelled');
+      const updatedTotals = calculateTotals(activeItems, {
+        discountPercent: order.discount,
+        customDiscountAmt: order.customDiscountAmt,
+        serviceChargeRate: order.serviceChargeRate,
+        gstRate: order.gstRate,
+        isInterState: order.isInterState,
+        roundOffAmount: order.roundOffAmount,
+        compDiscountAmt: order.compDiscountAmt
+      });
+
+      Object.assign(order, updatedTotals);
+
+      await logAudit({
+        action: 'ITEM_VOIDED',
+        resource: 'Order',
+        resourceId: String(order._id),
+        user: req.user,
+        metadata: {
+          orderNumber: order.orderNumber,
+          tableNo: order.tableNo,
+          itemName: foundItem.name,
+          quantity: foundItem.quantity,
+          price: foundItem.price,
+          reason: req.body.reason || 'Item cancelled'
+        },
+        req
+      });
+    }
+
     await order.save();
+    try {
+      await order.populate('tableId', 'tableNo tableNumber floor capacity');
+    } catch (popErr) {
+      console.warn('Populate tableId warning:', popErr.message);
+    }
+
+    const io = req.app.get('io');
+    if (io) {
+      io.emit('order-updated', { order });
+      io.emit('kot-item-updated', { orderId, kotNumber, itemId, status, order });
+
+      // Live buzzer alert to all waiter apps when dish is cooked and ready to serve
+      if (status === 'ready') {
+        io.emit('food-ready', {
+          orderId,
+          kotNumber,
+          itemId,
+          itemName: foundItem?.name || 'Dish',
+          quantity: foundItem?.quantity || 1,
+          portion: foundItem?.portion || 'Full',
+          tableNo: order.tableId?.tableNo || order.tableId?.tableNumber || '',
+          tableId: order.tableId?._id || order.tableId || null
+        });
+      }
+    }
 
     res.json({ success: true, message: 'Item status updated successfully!', data: order });
   } catch (error) {
@@ -537,4 +766,33 @@ router.put('/:orderId/item-status', async (req, res) => {
     res.status(500).json({ success: false, message: error.message });
   }
 });
+
+// 7. Download Printable PDF Invoice
+router.get('/invoice/:id/pdf', async (req, res) => {
+  try {
+    const order = await Order.findById(req.params.id).populate('tableId', 'tableNo tableNumber floor');
+    if (!order) {
+      return res.status(404).json({ success: false, message: 'Order not found' });
+    }
+
+    const filename = `Invoice_${order.invoiceNumber || String(order._id).slice(-8)}.pdf`;
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+
+    const pdfDoc = generateInvoicePDF(order, {
+      name: 'Tamanna Restaurant',
+      tagline: '100% Pure Vegetarian Fine Dining',
+      address: 'Main Market, Station Road',
+      phone: '+91 98765 43210',
+      gstin: '08AAAAA0000A1Z5',
+      fssai: '12345678901234'
+    });
+
+    pdfDoc.pipe(res);
+  } catch (error) {
+    console.error('PDF Invoice Error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
 module.exports = router;

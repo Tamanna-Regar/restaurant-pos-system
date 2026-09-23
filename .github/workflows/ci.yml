@@ -1,0 +1,67 @@
+name: CI Pipeline - Tamanna Restaurant POS
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  backend-test:
+    name: Backend Lint & Automated Tests
+    runs-on: ubuntu-latest
+
+    services:
+      mongodb:
+        image: mongo:7.0
+        ports:
+          - 27017:27017
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: restaurant-pos-backend/package-lock.json
+
+      - name: Install Backend Dependencies
+        working-directory: ./restaurant-pos-backend
+        run: npm ci
+
+      - name: Run Backend Tests
+        working-directory: ./restaurant-pos-backend
+        env:
+          MONGO_URI: mongodb://localhost:27017/restaurant_pos_test
+          JWT_SECRET: test_ci_jwt_secret
+          PORT: 5001
+        run: npm test
+
+  frontend-build:
+    name: Frontend Build & Typecheck
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: restaurant-pos-frontend/package-lock.json
+
+      - name: Install Frontend Dependencies
+        working-directory: ./restaurant-pos-frontend
+        run: npm install --legacy-peer-deps
+
+      - name: Build Frontend Production Bundle
+        working-directory: ./restaurant-pos-frontend
+        env:
+          CI: false
+        run: npm run build
+

@@ -1,6 +1,7 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
+import RbacMatrixManager from "./RbacMatrixManager";
 
 function AdminDashboard({ handleLogout }) {
   const [activeTab, setActiveTab] = useState("overview");
@@ -34,6 +35,8 @@ function AdminDashboard({ handleLogout }) {
           address: "",
           phone: "",
           gstin: "",
+          fssai: "",
+          upiId: "",
         }
       );
     } catch {
@@ -42,8 +45,9 @@ function AdminDashboard({ handleLogout }) {
         address: "",
         phone: "",
         gstin: "",
+        fssai: "",
+        upiId: "",
       };
-
     }
   });
 
@@ -62,15 +66,25 @@ function AdminDashboard({ handleLogout }) {
   const [newTable, setNewTable] = useState({
     tableNumber: "",
     capacity: "4",
-    floor: "Floor 1",
+    floor: "Veg Floor",
     type: "Dining",
+  });
+
+  const [coupons, setCoupons] = useState([]);
+  const [newCoupon, setNewCoupon] = useState({
+    code: "",
+    discountType: "percentage",
+    discountValue: "",
+    minOrderAmount: "",
+    maxDiscountAmount: "",
+    validTill: "",
   });
 
   const loadData = async () => {
     try {
       setLoading(true);
 
-      const [ordersRes, tablesRes, menuRes, branchesRes, comparisonRes] =
+      const [ordersRes, tablesRes, menuRes, branchesRes, comparisonRes, couponsRes] =
         await Promise.all([
           api
             .get("/orders/active")
@@ -85,12 +99,15 @@ function AdminDashboard({ handleLogout }) {
             .catch(() => ({ data: { data: [] } })),
           api.get("/branches").catch(() => ({ data: { data: [] } })),
           api.get("/branches/comparison/summary").catch(() => ({ data: { data: [] } })),
+          api.get("/coupons").catch(() => ({ data: { data: [] } })),
         ]);
 
       const [usersRes, activityRes] = await Promise.all([
         api.get("/auth/users").catch(() => ({ data: { data: [] } })),
         api.get("/auth/login-activity?limit=50").catch(() => ({ data: { data: [] } }))
       ]);
+
+      setCoupons(couponsRes.data?.data || []);
 
       setOrders(
         ordersRes.data?.data ||
@@ -294,22 +311,44 @@ function AdminDashboard({ handleLogout }) {
   const addTable = async (e) => {
     e.preventDefault();
 
-    if (!newTable.tableNumber) {
-      setMessage("Table number required hai.");
+    const formData = new FormData(e.currentTarget);
+    const tableNumberValue = String(
+      formData.get("tableNumber") ?? newTable.tableNumber ?? ""
+    ).trim();
+    const capacityValue = String(
+      formData.get("capacity") ?? newTable.capacity ?? "4"
+    ).trim();
+    const tableNumber = Number(tableNumberValue);
+    const capacity = Number(capacityValue);
+
+    if (!Number.isInteger(tableNumber) || tableNumber < 1) {
+      setMessage("Valid table number enter karo.");
+      return;
+    }
+    if (!Number.isFinite(capacity) || capacity < 1) {
+      setMessage("Capacity positive number honi chahiye.");
       return;
     }
 
     try {
+      const normalizedFloor = {
+        "Floor 1": "Veg Floor",
+        "Floor 2": "Birthday Party Zone",
+        "Rooftop": "Rooftop",
+      }[newTable.floor] || newTable.floor;
+
       await api.post("/tables", {
         ...newTable,
-        tableNumber: String(newTable.tableNumber),
-        capacity: Number(newTable.capacity),
+        floor: normalizedFloor,
+        tableNo: tableNumber,
+        tableNumber,
+        capacity,
       });
 
       setNewTable({
         tableNumber: "",
         capacity: "4",
-        floor: "Floor 1",
+        floor: "Veg Floor",
         type: "Dining",
       });
 
@@ -394,6 +433,52 @@ function AdminDashboard({ handleLogout }) {
       maximumFractionDigits: 2,
     })}`;
 
+  const handleCreateCoupon = async (e) => {
+    if (e) e.preventDefault();
+    if (!newCoupon.code || !newCoupon.discountValue) {
+      alert("Please enter Coupon Code and Discount Value");
+      return;
+    }
+    try {
+      const res = await api.post("/coupons/create", newCoupon);
+      if (res.data?.success) {
+        setCoupons([res.data.data, ...coupons]);
+        setNewCoupon({
+          code: "",
+          discountType: "percentage",
+          discountValue: "",
+          minOrderAmount: "",
+          maxDiscountAmount: "",
+          validTill: "",
+        });
+        alert("Coupon created successfully!");
+      }
+    } catch (err) {
+      alert(err.response?.data?.message || "Failed to create coupon");
+    }
+  };
+
+  const handleToggleCoupon = async (id) => {
+    try {
+      const res = await api.patch(`/coupons/${id}/toggle`);
+      if (res.data?.success) {
+        setCoupons(coupons.map((c) => (c._id === id ? res.data.data : c)));
+      }
+    } catch {
+      alert("Failed to toggle coupon status");
+    }
+  };
+
+  const handleDeleteCoupon = async (id) => {
+    if (!window.confirm("Delete this coupon?")) return;
+    try {
+      await api.delete(`/coupons/${id}`);
+      setCoupons(coupons.filter((c) => c._id !== id));
+    } catch {
+      alert("Failed to delete coupon");
+    }
+  };
+
   return (
     <div className="admin-dashboard" style={styles.page}>
 
@@ -436,6 +521,8 @@ function AdminDashboard({ handleLogout }) {
           ["orders", "🧾 Orders"],
           ["users", "👥 Staff Users"],
           ["branches", "🏢 Branches"],
+          ["coupons", "🎟️ Promo Coupons"],
+          ["rbac", "🛡️ Permissions (RBAC)"],
           ["settings", "⚙️ Settings"],
         ].map(([key, label]) => (
           <button
@@ -881,6 +968,10 @@ function AdminDashboard({ handleLogout }) {
                 style={styles.inlineForm}
               >
                 <input
+                  name="tableNumber"
+                  type="number"
+                  min="1"
+                  step="1"
                   value={newTable.tableNumber}
                   onChange={(e) =>
                     setNewTable({
@@ -892,7 +983,10 @@ function AdminDashboard({ handleLogout }) {
                 />
 
                 <input
+                  name="capacity"
                   type="number"
+                  min="1"
+                  step="1"
                   value={newTable.capacity}
                   onChange={(e) =>
                     setNewTable({
@@ -912,9 +1006,9 @@ function AdminDashboard({ handleLogout }) {
                     })
                   }
                 >
-                  <option>Floor 1</option>
-                  <option>Floor 2</option>
-                  <option>Rooftop</option>
+                  <option value="Veg Floor">Veg Floor</option>
+                  <option value="Birthday Party Zone">Birthday Party Zone</option>
+                  <option value="Rooftop">Rooftop</option>
                 </select>
 
                 <button
@@ -1176,6 +1270,34 @@ function AdminDashboard({ handleLogout }) {
                   />
                 </label>
 
+                <label>
+                  FSSAI License No.
+                  <input
+                    placeholder="e.g. 12221027000123"
+                    value={restaurant.fssai || ""}
+                    onChange={(e) =>
+                      setRestaurant({
+                        ...restaurant,
+                        fssai: e.target.value,
+                      })
+                    }
+                  />
+                </label>
+
+                <label>
+                  UPI ID (for Dynamic QR Code on Bill)
+                  <input
+                    placeholder="e.g. restaurant@upi / 9876543210@paytm"
+                    value={restaurant.upiId || ""}
+                    onChange={(e) =>
+                      setRestaurant({
+                        ...restaurant,
+                        upiId: e.target.value,
+                      })
+                    }
+                  />
+                </label>
+
                 <button
                   onClick={saveRestaurant}
                   style={styles.primaryButton}
@@ -1187,6 +1309,223 @@ function AdminDashboard({ handleLogout }) {
             </div>
           </>
         )}
+
+        {/* PROMO COUPONS */}
+        {activeTab === "coupons" && (
+          <>
+            <div style={styles.pageHeading}>
+              <div>
+                <h2>🎟️ Promo Coupons & Discounts</h2>
+                <p>
+                  Manage promotional coupons applicable during checkout in POS billing.
+                </p>
+              </div>
+            </div>
+
+            {/* CREATE COUPON FORM */}
+            <div style={{ ...styles.card, marginBottom: "20px" }}>
+              <h3 style={{ margin: "0 0 16px 0", fontSize: "16px", fontWeight: "700" }}>
+                ➕ Create New Coupon
+              </h3>
+              <form onSubmit={handleCreateCoupon} style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: "12px", alignItems: "flex-end" }}>
+                <div>
+                  <label style={{ fontSize: "12px", fontWeight: "600", display: "block", marginBottom: "4px" }}>
+                    Coupon Code
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. FESTIVE25"
+                    value={newCoupon.code}
+                    onChange={(e) => setNewCoupon({ ...newCoupon, code: e.target.value.toUpperCase() })}
+                    style={{ width: "100%", padding: "8px 10px", borderRadius: "6px", border: "1px solid #cbd5e1", boxSizing: "border-box" }}
+                  />
+                </div>
+
+                <div>
+                  <label style={{ fontSize: "12px", fontWeight: "600", display: "block", marginBottom: "4px" }}>
+                    Discount Type
+                  </label>
+                  <select
+                    value={newCoupon.discountType}
+                    onChange={(e) => setNewCoupon({ ...newCoupon, discountType: e.target.value })}
+                    style={{ width: "100%", padding: "8px 10px", borderRadius: "6px", border: "1px solid #cbd5e1", boxSizing: "border-box" }}
+                  >
+                    <option value="percentage">% Percentage</option>
+                    <option value="flat">₹ Flat Amount</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label style={{ fontSize: "12px", fontWeight: "600", display: "block", marginBottom: "4px" }}>
+                    Discount Value ({newCoupon.discountType === 'percentage' ? '%' : '₹'})
+                  </label>
+                  <input
+                    type="number"
+                    placeholder="e.g. 20"
+                    value={newCoupon.discountValue}
+                    onChange={(e) => setNewCoupon({ ...newCoupon, discountValue: e.target.value })}
+                    style={{ width: "100%", padding: "8px 10px", borderRadius: "6px", border: "1px solid #cbd5e1", boxSizing: "border-box" }}
+                  />
+                </div>
+
+                <div>
+                  <label style={{ fontSize: "12px", fontWeight: "600", display: "block", marginBottom: "4px" }}>
+                    Min Bill Amount (₹)
+                  </label>
+                  <input
+                    type="number"
+                    placeholder="e.g. 300"
+                    value={newCoupon.minOrderAmount}
+                    onChange={(e) => setNewCoupon({ ...newCoupon, minOrderAmount: e.target.value })}
+                    style={{ width: "100%", padding: "8px 10px", borderRadius: "6px", border: "1px solid #cbd5e1", boxSizing: "border-box" }}
+                  />
+                </div>
+
+                <div>
+                  <label style={{ fontSize: "12px", fontWeight: "600", display: "block", marginBottom: "4px" }}>
+                    Max Discount Cap (₹)
+                  </label>
+                  <input
+                    type="number"
+                    placeholder="0 = Unlimited"
+                    value={newCoupon.maxDiscountAmount}
+                    onChange={(e) => setNewCoupon({ ...newCoupon, maxDiscountAmount: e.target.value })}
+                    style={{ width: "100%", padding: "8px 10px", borderRadius: "6px", border: "1px solid #cbd5e1", boxSizing: "border-box" }}
+                  />
+                </div>
+
+                <div>
+                  <label style={{ fontSize: "12px", fontWeight: "600", display: "block", marginBottom: "4px" }}>
+                    Valid Till
+                  </label>
+                  <input
+                    type="date"
+                    value={newCoupon.validTill}
+                    onChange={(e) => setNewCoupon({ ...newCoupon, validTill: e.target.value })}
+                    style={{ width: "100%", padding: "8px 10px", borderRadius: "6px", border: "1px solid #cbd5e1", boxSizing: "border-box" }}
+                  />
+                </div>
+
+                <div>
+                  <button
+                    type="submit"
+                    style={{
+                      width: "100%",
+                      background: "#2563eb",
+                      color: "#fff",
+                      border: 0,
+                      borderRadius: "6px",
+                      padding: "10px",
+                      fontWeight: "700",
+                      cursor: "pointer"
+                    }}
+                  >
+                    Create Coupon
+                  </button>
+                </div>
+              </form>
+            </div>
+
+            {/* COUPONS LIST TABLE */}
+            <div style={styles.card}>
+              <h3 style={{ margin: "0 0 16px 0", fontSize: "16px", fontWeight: "700" }}>
+                Active & Saved Coupons ({coupons.length})
+              </h3>
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
+                  <thead>
+                    <tr style={{ background: "#f8fafc", borderBottom: "2px solid #e2e8f0", textAlign: "left" }}>
+                      <th style={{ padding: "10px" }}>Code</th>
+                      <th style={{ padding: "10px" }}>Type & Value</th>
+                      <th style={{ padding: "10px" }}>Min Bill</th>
+                      <th style={{ padding: "10px" }}>Max Cap</th>
+                      <th style={{ padding: "10px" }}>Valid Till</th>
+                      <th style={{ padding: "10px" }}>Status</th>
+                      <th style={{ padding: "10px", textAlign: "right" }}>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {coupons.map((c) => (
+                      <tr key={c._id} style={{ borderBottom: "1px solid #f1f5f9" }}>
+                        <td style={{ padding: "10px" }}>
+                          <span style={{
+                            background: "#e0f2fe",
+                            color: "#0369a1",
+                            padding: "3px 8px",
+                            borderRadius: "6px",
+                            fontWeight: "800",
+                            letterSpacing: "0.5px"
+                          }}>
+                            {c.code}
+                          </span>
+                        </td>
+                        <td style={{ padding: "10px", fontWeight: "600" }}>
+                          {c.discountType === "percentage" ? `${c.discountValue}% OFF` : `₹${c.discountValue} FLAT OFF`}
+                        </td>
+                        <td style={{ padding: "10px" }}>₹{c.minOrderAmount || 0}</td>
+                        <td style={{ padding: "10px" }}>
+                          {c.maxDiscountAmount ? `₹${c.maxDiscountAmount}` : "No Cap"}
+                        </td>
+                        <td style={{ padding: "10px", color: "#64748b" }}>
+                          {new Date(c.validTill).toLocaleDateString("en-IN")}
+                        </td>
+                        <td style={{ padding: "10px" }}>
+                          <span style={{
+                            background: c.isActive ? "#dcfce7" : "#fee2e2",
+                            color: c.isActive ? "#15803d" : "#991b1b",
+                            padding: "2px 8px",
+                            borderRadius: "10px",
+                            fontSize: "11px",
+                            fontWeight: "700"
+                          }}>
+                            {c.isActive ? "Active" : "Inactive"}
+                          </span>
+                        </td>
+                        <td style={{ padding: "10px", textAlign: "right" }}>
+                          <div style={{ display: "inline-flex", gap: "6px" }}>
+                            <button
+                              onClick={() => handleToggleCoupon(c._id)}
+                              style={{
+                                background: c.isActive ? "#fef3c7" : "#dcfce7",
+                                color: c.isActive ? "#b45309" : "#15803d",
+                                border: 0,
+                                borderRadius: "4px",
+                                padding: "4px 8px",
+                                fontSize: "11px",
+                                fontWeight: "600",
+                                cursor: "pointer"
+                              }}
+                            >
+                              {c.isActive ? "Pause" : "Activate"}
+                            </button>
+                            <button
+                              onClick={() => handleDeleteCoupon(c._id)}
+                              style={{
+                                background: "#fee2e2",
+                                color: "#dc2626",
+                                border: 0,
+                                borderRadius: "4px",
+                                padding: "4px 8px",
+                                fontSize: "11px",
+                                fontWeight: "600",
+                                cursor: "pointer"
+                              }}
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </>
+        )}
+
+        {/* ROLE BASED ACCESS CONTROL (RBAC) */}
+        {activeTab === "rbac" && <RbacMatrixManager />}
 
       </main>
     </div>

@@ -91,7 +91,7 @@ const orderSchema = new mongoose.Schema({
 
   paymentMode: { 
     type: String, 
-    enum: ['Cash', 'PhonePe', 'QR', 'Online', 'UPI', 'Card', 'Credit/Debit Card', 'QR Code', 'UPI/Online', 'Split'], 
+    enum: ['Cash', 'PhonePe', 'QR', 'Online', 'UPI', 'Card', 'Credit/Debit Card', 'QR Code', 'UPI/Online', 'Split', 'Razorpay'], 
     default: 'Cash' 
   },
   paymentBreakdown: { type: mongoose.Schema.Types.Mixed, default: null },

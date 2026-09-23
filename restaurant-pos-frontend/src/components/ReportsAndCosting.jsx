@@ -92,6 +92,12 @@ export default function ReportsAndCosting() {
     downloadCsv(rows, `owner-profit-${from}-to-${to}.csv`);
   };
 
+  const exportTallyXml = () => {
+    const apiUrl = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
+    const url = `${apiUrl}/reports/export/tally-xml?from=${from}&to=${to}`;
+    window.open(url, '_blank');
+  };
+
   const printReport = () => {
     if (!ownerProfit && !report && !tax) return;
     window.print();
@@ -150,6 +156,7 @@ export default function ReportsAndCosting() {
           <button onClick={exportCsv} disabled={!report?.rows?.length} style={{ padding: '8px 12px', border: '1px solid #cbd5e1', borderRadius: 7, background: '#fff', cursor: 'pointer' }}>Export CSV</button>
           <button onClick={exportTaxCsv} disabled={!tax} style={{ padding: '8px 12px', border: '1px solid #cbd5e1', borderRadius: 7, background: '#fff', cursor: 'pointer' }}>GST CSV</button>
           <button onClick={exportOwnerCsv} disabled={!ownerProfit} style={{ padding: '8px 12px', border: '1px solid #cbd5e1', borderRadius: 7, background: '#fff', cursor: 'pointer' }}>Excel Report</button>
+          <button onClick={exportTallyXml} style={{ padding: '8px 12px', border: '1px solid #0284c7', borderRadius: 7, background: '#e0f2fe', color: '#0369a1', fontWeight: 'bold', cursor: 'pointer' }} title="Export vouchers XML compatible with Tally ERP 9 and TallyPrime">📥 Tally XML</button>
           <button onClick={printReport} disabled={!ownerProfit && !report && !tax} style={{ padding: '8px 12px', border: 0, borderRadius: 7, background: '#0f766e', color: '#fff', cursor: 'pointer' }}>Print / PDF</button>
         </div>
       </div>

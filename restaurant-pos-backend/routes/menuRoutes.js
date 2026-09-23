@@ -4,6 +4,7 @@ const Item = require('../models/Item');
 const { authenticate, authorize } = require('../middleware/authMiddleware');
 
 const menuManager = [authenticate, authorize('admin', 'manager')];
+const availabilityManager = [authenticate, authorize('admin', 'manager', 'chef', 'waiter')];
 
 // 1. Get All Menu Items
 router.get('/', async (req, res) => {
@@ -103,14 +104,24 @@ router.post('/import', ...menuManager, async (req, res) => {
   }
 });
 
-// 3. Update Item Availability
-router.patch('/toggle/:id', ...menuManager, async (req, res) => {
+// 3. Update Item Availability (86-ing)
+router.patch('/toggle/:id', ...availabilityManager, async (req, res) => {
   try {
     const item = await Item.findById(req.params.id);
     if (!item) return res.status(404).json({ message: 'Item not found' });
 
     item.isAvailable = !item.isAvailable;
     await item.save();
+
+    const io = req.app.get('io');
+    if (io) {
+      io.emit('menu-item-availability-updated', {
+        itemId: item._id,
+        isAvailable: item.isAvailable,
+        name: item.name
+      });
+    }
+
     res.json({ success: true, data: item });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });

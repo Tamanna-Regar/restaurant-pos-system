@@ -1,5 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { QRCodeCanvas } from 'qrcode.react';
+import { openRazorpayCheckout } from '../utils/razorpayHelper';
+import { buildBillEscPosBuffer, buildKotEscPosBuffer, printDirectWebSerial, printViaRawBT, downloadEscPosFile } from '../utils/escposHelper';
+import { api } from '../api';
 
 // ---------------------------------------------------------------------------
 // 1. Indian Standard FSSAI Veg / Non-Veg / Egg Badge
@@ -97,7 +100,9 @@ export function TableCard({
       style={{
         position: 'relative',
         backgroundColor: isSelected ? '#f8fafc' : '#ffffff',
-        border: `2px solid ${isSelected ? statusColor : '#e2e8f0'}`,
+        borderLeft: `2px solid ${isSelected ? statusColor : '#e2e8f0'}`,
+        borderRight: `2px solid ${isSelected ? statusColor : '#e2e8f0'}`,
+        borderBottom: `2px solid ${isSelected ? statusColor : '#e2e8f0'}`,
         borderTop: `4px solid ${statusColor}`,
         borderRadius: '10px',
         padding: '12px 14px',
@@ -336,20 +341,72 @@ export function QuickSettleModal({
   order,
   restaurantSettings = {},
   onClose,
-  onConfirmSettle
+  onConfirmSettle,
+  onSendWhatsApp
 }) {
   const [paymentMode, setPaymentMode] = useState('Cash');
   const [cashTendered, setCashTendered] = useState('');
   const [splitAmounts, setSplitAmounts] = useState({ cash: '', online: '' });
   const [paymentReference, setPaymentReference] = useState('');
+  const [isProcessingRazorpay, setIsProcessingRazorpay] = useState(false);
+  const [razorpayError, setRazorpayError] = useState('');
+  const [customerPhone, setCustomerPhone] = useState(order?.customerPhone || '');
+  const [customerPoints, setCustomerPoints] = useState(0);
+  const [redeemLoyalty, setRedeemLoyalty] = useState(false);
+  const [thermalStatus, setThermalStatus] = useState('');
+
+  useEffect(() => {
+    const cleanPhone = String(customerPhone || '').replace(/\D/g, '').slice(-10);
+    if (cleanPhone.length === 10) {
+      api.get(`/customers/${cleanPhone}`)
+        .then((res) => {
+          const pts = res.data?.data?.loyaltyPoints ?? res.data?.loyaltyPoints;
+          if (pts && Number(pts) > 0) {
+            setCustomerPoints(Number(pts));
+          } else {
+            setCustomerPoints(0);
+          }
+        })
+        .catch(() => setCustomerPoints(0));
+    }
+  }, [customerPhone]);
 
   if (!order) return null;
 
-  const total = Number(order.grandTotal || 0);
+  const baseTotal = Number(order.grandTotal || 0);
+  const maxPointDiscount = Math.min(Number((customerPoints * 0.5).toFixed(2)), Number((baseTotal * 0.5).toFixed(2)));
+  const pointsDiscountAmt = redeemLoyalty ? maxPointDiscount : 0;
+  const total = Math.max(0, Number((baseTotal - pointsDiscountAmt).toFixed(2)));
   const tenderedNum = Number(cashTendered || 0);
   const changeReturn = Math.max(0, tenderedNum - total);
   const splitTotal = Number(splitAmounts.cash || 0) + Number(splitAmounts.online || 0);
   const splitIsValid = paymentMode !== 'Split' || Math.abs(splitTotal - total) <= 0.01;
+
+  const handleThermalPrint = async () => {
+    try {
+      setThermalStatus('Generating ESC/POS...');
+      const bytes = buildBillEscPosBuffer({
+        ...order,
+        grandTotal: total,
+        paymentMode
+      }, restaurantSettings, restaurantSettings.printerWidth === '58mm' ? 32 : 48);
+
+      if (navigator.serial) {
+        setThermalStatus('Printing via USB Serial...');
+        await printDirectWebSerial(bytes);
+        setThermalStatus('Printed successfully!');
+      } else {
+        downloadEscPosFile(bytes, `receipt_${order.invoiceNumber || 'bill'}.bin`);
+        setThermalStatus('ESC/POS file ready.');
+      }
+    } catch (err) {
+      console.warn('Direct serial print fallback:', err.message);
+      const bytes = buildBillEscPosBuffer(order, restaurantSettings);
+      downloadEscPosFile(bytes, `receipt_${order.invoiceNumber || 'bill'}.bin`);
+      setThermalStatus('ESC/POS file downloaded.');
+    }
+    setTimeout(() => setThermalStatus(''), 4000);
+  };
 
   // Quick cash note presets
   const quickCashPresets = [
@@ -366,18 +423,62 @@ export function QuickSettleModal({
   const restroName = encodeURIComponent(restaurantSettings.name || 'Restro');
   const upiUri = `upi://pay?pa=${upiId}&pn=${restroName}&am=${total.toFixed(2)}&cu=INR&tn=Bill%20Payment`;
   const digitalPaymentNeedsReference = paymentMode === 'UPI/Online' || paymentMode === 'Credit/Debit Card';
-  const canSettle = (paymentMode !== 'Cash' || cashTendered === '' || tenderedNum >= total)
-    && splitIsValid
-    && (!digitalPaymentNeedsReference || paymentReference.trim().length > 0);
+  const canSettle = paymentMode === 'Razorpay'
+    ? !isProcessingRazorpay
+    : (paymentMode !== 'Cash' || cashTendered === '' || tenderedNum >= total)
+      && splitIsValid
+      && (!digitalPaymentNeedsReference || paymentReference.trim().length > 0);
+
+  const handleRazorpayPayment = async () => {
+    setIsProcessingRazorpay(true);
+    setRazorpayError('');
+    try {
+      await openRazorpayCheckout({
+        orderId: order._id,
+        amount: total,
+        customerName: order.customerName,
+        customerPhone: order.customerPhone,
+        description: `Order Bill - ${order.orderType || 'Dine-In'}${order.tableId ? ` (Table ${order.tableId.tableNo || order.tableId.tableNumber})` : ''}`,
+        onSuccess: (paymentData) => {
+          setIsProcessingRazorpay(false);
+          onConfirmSettle({
+            paymentMode: 'Razorpay',
+            cashTendered: total,
+            changeReturn: 0,
+            splitAmounts: null,
+            paymentReference: paymentData.paymentId || 'RAZORPAY_PAID',
+            paymentProvider: 'Razorpay'
+          });
+        },
+        onFailure: (err) => {
+          setIsProcessingRazorpay(false);
+          setRazorpayError(err.message || 'Payment not completed or failed.');
+        },
+        onDismiss: () => {
+          setIsProcessingRazorpay(false);
+        }
+      });
+    } catch (err) {
+      setIsProcessingRazorpay(false);
+      setRazorpayError(err.message || 'Could not launch Razorpay');
+    }
+  };
 
   const handleSettle = () => {
+    if (paymentMode === 'Razorpay') {
+      handleRazorpayPayment();
+      return;
+    }
     onConfirmSettle({
       paymentMode,
-      cashTendered: paymentMode === 'Cash' ? tenderedNum : total,
+      cashTendered: paymentMode === 'Cash' ? (tenderedNum || total) : total,
       changeReturn: paymentMode === 'Cash' ? changeReturn : 0,
       splitAmounts: paymentMode === 'Split' ? splitAmounts : null,
       paymentReference: paymentReference.trim(),
-      paymentProvider: paymentMode === 'UPI/Online' ? 'UPI QR' : paymentMode === 'Credit/Debit Card' ? 'Card POS' : 'manual'
+      paymentProvider: paymentMode === 'UPI/Online' ? 'UPI QR' : paymentMode === 'Credit/Debit Card' ? 'Card POS' : 'manual',
+      redeemedPoints: redeemLoyalty ? Math.round(pointsDiscountAmt * 2) : 0,
+      pointsDiscount: pointsDiscountAmt,
+      customerPhone: String(customerPhone || '').trim()
     });
   };
 
@@ -428,13 +529,14 @@ export function QuickSettleModal({
         </div>
 
         {/* Bill Breakdown Summary Banner */}
-        <div style={{ backgroundColor: '#f1f5f9', borderRadius: '10px', padding: '14px 18px', marginBottom: '18px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div style={{ backgroundColor: '#f1f5f9', borderRadius: '10px', padding: '14px 18px', marginBottom: '14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div>
             <div style={{ fontSize: '11px', color: '#64748b', textTransform: 'uppercase', fontWeight: 'bold' }}>Total Bill Payable</div>
             <div style={{ fontSize: '28px', fontWeight: 'bold', color: '#0f172a' }}>₹{total.toFixed(2)}</div>
             <div style={{ fontSize: '11px', color: '#64748b' }}>
               Subtotal: ₹{order.subTotal?.toFixed(2) || '0'} | GST: ₹{order.tax?.toFixed(2) || '0'}
               {order.discount > 0 ? ` | Disc: -₹${order.discountAmt?.toFixed(2)}` : ''}
+              {pointsDiscountAmt > 0 ? ` | Loyalty: -₹${pointsDiscountAmt.toFixed(2)}` : ''}
             </div>
           </div>
           <span style={{ backgroundColor: '#10b981', color: '#fff', padding: '6px 12px', borderRadius: '20px', fontSize: '12px', fontWeight: 'bold' }}>
@@ -442,13 +544,55 @@ export function QuickSettleModal({
           </span>
         </div>
 
+        {/* Customer & Loyalty Points Redemption Box */}
+        <div style={{ backgroundColor: '#fffbeb', border: '1px solid #fde68a', borderRadius: '10px', padding: '10px 14px', marginBottom: '16px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span style={{ fontSize: '18px' }}>⭐</span>
+              <div>
+                <div style={{ fontSize: '12px', fontWeight: 'bold', color: '#92400e' }}>
+                  Customer Phone: <input
+                    type="text"
+                    value={customerPhone}
+                    onChange={(e) => setCustomerPhone(e.target.value)}
+                    placeholder="10-digit phone"
+                    style={{ padding: '2px 6px', fontSize: '11px', borderRadius: '4px', border: '1px solid #cbd5e1', width: '105px', marginLeft: '4px' }}
+                  />
+                </div>
+                <div style={{ fontSize: '11px', color: '#b45309', marginTop: '2px' }}>
+                  Loyalty Points: <b>{customerPoints} Pts</b> {customerPoints > 0 ? `(Max Value: ₹${maxPointDiscount.toFixed(2)})` : ''}
+                </div>
+              </div>
+            </div>
+            {customerPoints > 0 && (
+              <button
+                type="button"
+                onClick={() => setRedeemLoyalty(!redeemLoyalty)}
+                style={{
+                  padding: '5px 12px',
+                  backgroundColor: redeemLoyalty ? '#d97706' : '#fff',
+                  color: redeemLoyalty ? '#fff' : '#b45309',
+                  border: '1px solid #d97706',
+                  borderRadius: '6px',
+                  fontSize: '11px',
+                  fontWeight: 'bold',
+                  cursor: 'pointer'
+                }}
+              >
+                {redeemLoyalty ? `✓ Redeemed -₹${pointsDiscountAmt.toFixed(2)}` : `Redeem -₹${maxPointDiscount.toFixed(2)}`}
+              </button>
+            )}
+          </div>
+        </div>
+
         {/* Payment Modes Tabs */}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '8px', marginBottom: '18px' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(100px, 1fr))', gap: '8px', marginBottom: '18px' }}>
           {[
-            { id: 'Cash', label: '💵 Cash', icon: '💵' },
-            { id: 'UPI/Online', label: '📱 UPI / QR', icon: '📱' },
-            { id: 'Credit/Debit Card', label: '💳 Card', icon: '💳' },
-            { id: 'Split', label: '⚡ Split', icon: '⚡' }
+            { id: 'Cash', label: '💵 Cash' },
+            { id: 'Razorpay', label: '⚡ Razorpay' },
+            { id: 'UPI/Online', label: '📱 UPI / QR' },
+            { id: 'Credit/Debit Card', label: '💳 Card' },
+            { id: 'Split', label: '⚡ Split' }
           ].map((mode) => (
             <button
               key={mode.id}
@@ -457,9 +601,9 @@ export function QuickSettleModal({
                 padding: '10px 6px',
                 borderRadius: '8px',
                 border: '2px solid',
-                borderColor: paymentMode === mode.id ? '#10b981' : '#e2e8f0',
-                backgroundColor: paymentMode === mode.id ? '#ecfdf5' : '#ffffff',
-                color: paymentMode === mode.id ? '#047857' : '#475569',
+                borderColor: paymentMode === mode.id ? (mode.id === 'Razorpay' ? '#0284c7' : '#10b981') : '#e2e8f0',
+                backgroundColor: paymentMode === mode.id ? (mode.id === 'Razorpay' ? '#f0f9ff' : '#ecfdf5') : '#ffffff',
+                color: paymentMode === mode.id ? (mode.id === 'Razorpay' ? '#0369a1' : '#047857') : '#475569',
                 fontSize: '12px',
                 fontWeight: 'bold',
                 cursor: 'pointer'
@@ -471,6 +615,58 @@ export function QuickSettleModal({
         </div>
 
         {/* Dynamic Mode Content */}
+        {paymentMode === 'Razorpay' && (
+          <div style={{ backgroundColor: '#f0fdf4', borderRadius: '12px', padding: '20px', border: '2px solid #86efac', textAlign: 'center', marginBottom: '20px' }}>
+            <div style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', backgroundColor: '#dcfce7', padding: '4px 14px', borderRadius: '20px', marginBottom: '10px' }}>
+              <span style={{ fontSize: '13px', fontWeight: 'bold', color: '#166534' }}>⚡ Verified Razorpay Gateway</span>
+            </div>
+            <h4 style={{ margin: '0 0 6px 0', fontSize: '16px', fontWeight: 'bold', color: '#0f172a' }}>
+              Instant Online Payment (₹{total.toFixed(2)})
+            </h4>
+            <p style={{ margin: '0 0 16px 0', fontSize: '12px', color: '#475569' }}>
+              Accepts GPay, PhonePe, Paytm, all UPI apps, Credit/Debit Cards, NetBanking & Wallets with instant verification.
+            </p>
+
+            {razorpayError && (
+              <div style={{ backgroundColor: '#fee2e2', color: '#991b1b', border: '1px solid #fca5a5', padding: '8px 12px', borderRadius: '8px', fontSize: '12px', marginBottom: '14px' }}>
+                ⚠️ {razorpayError}
+              </div>
+            )}
+
+            <button
+              type="button"
+              onClick={handleRazorpayPayment}
+              disabled={isProcessingRazorpay}
+              style={{
+                width: '100%',
+                padding: '14px',
+                background: 'linear-gradient(135deg, #0284c7 0%, #16a34a 100%)',
+                color: '#ffffff',
+                border: 'none',
+                borderRadius: '10px',
+                fontSize: '15px',
+                fontWeight: 'bold',
+                cursor: isProcessingRazorpay ? 'not-allowed' : 'pointer',
+                boxShadow: '0 4px 14px rgba(2, 132, 199, 0.35)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '8px',
+                opacity: isProcessingRazorpay ? 0.7 : 1
+              }}
+            >
+              {isProcessingRazorpay ? (
+                <>⏳ Connecting to Razorpay...</>
+              ) : (
+                <>⚡ Pay ₹{total.toFixed(2)} with Razorpay Now</>
+              )}
+            </button>
+            <div style={{ marginTop: '10px', fontSize: '11px', color: '#64748b' }}>
+              🔒 256-bit Encrypted · Auto Clears Bill & Frees Table Upon Success
+            </div>
+          </div>
+        )}
+
         {paymentMode === 'Cash' && (
           <div style={{ backgroundColor: '#fafafa', borderRadius: '10px', padding: '16px', border: '1px solid #e2e8f0', marginBottom: '20px' }}>
             <div style={{ marginBottom: '12px' }}>
@@ -628,6 +824,51 @@ export function QuickSettleModal({
           >
             Cancel (Esc)
           </button>
+          {onSendWhatsApp && (
+            <button
+              type="button"
+              onClick={onSendWhatsApp}
+              style={{
+                flex: 1,
+                padding: '12px',
+                background: 'linear-gradient(135deg, #25d366 0%, #128c7e 100%)',
+                color: '#fff',
+                border: 'none',
+                borderRadius: '8px',
+                fontWeight: 'bold',
+                fontSize: '13px',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '6px'
+              }}
+            >
+              📲 WhatsApp
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={handleThermalPrint}
+            style={{
+              flex: 1,
+              padding: '12px',
+              backgroundColor: '#0f172a',
+              color: '#38bdf8',
+              border: '1px solid #1e293b',
+              borderRadius: '8px',
+              fontWeight: 'bold',
+              fontSize: '12px',
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: '4px'
+            }}
+            title="Direct 58mm/80mm Thermal Receipt (Auto-Cut & Drawer Kick)"
+          >
+            🖨️ ESC/POS
+          </button>
           <button
             type="button"
             onClick={handleSettle}
@@ -635,7 +876,7 @@ export function QuickSettleModal({
             style={{
               flex: 2,
               padding: '12px',
-              backgroundColor: '#10b981',
+              backgroundColor: paymentMode === 'Razorpay' ? '#0284c7' : '#10b981',
               color: '#fff',
               border: 'none',
               borderRadius: '8px',
@@ -645,7 +886,11 @@ export function QuickSettleModal({
               opacity: !canSettle ? 0.6 : 1
             }}
           >
-            ✅ Complete & Settle Bill
+            {paymentMode === 'Razorpay' ? (
+              isProcessingRazorpay ? '⏳ Connecting to Razorpay...' : `⚡ Pay ₹${total.toFixed(2)} with Razorpay`
+            ) : (
+              '✅ Complete & Settle Bill'
+            )}
           </button>
         </div>
       </div>

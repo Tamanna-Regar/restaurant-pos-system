@@ -11,6 +11,13 @@ import ReportsAndCosting from './ReportsAndCosting';
 import RecipeBuilder from './RecipeBuilder';
 import CashierShift from './CashierShift';
 import CustomerCRM from './CustomerCRM';
+import OnlineOrders from './OnlineOrders';
+import AuditLogViewer from './AuditLogViewer';
+import TableQRGeneratorModal from './TableQRGeneratorModal';
+import AdvancedAnalytics from './AdvancedAnalytics';
+import { getActiveRbacMatrix } from './RbacMatrixManager';
+import { requestNotificationPermission, showDesktopNotification } from '../utils/desktopNotificationHelper';
+import { isAudioMuted, setAudioMuted, playTone, announceAuditEvent } from '../utils/audioAlert';
 
 import {BarChart,Bar,XAxis,YAxis,CartesianGrid,Tooltip,ResponsiveContainer} from 'recharts';
 
@@ -27,6 +34,10 @@ import {
 import { api } from '../api';
 import ReceiptPrintArea from './Receiptprintarea';
 import { ui } from '../styles/uiStyles';
+import { sendWhatsAppBill } from '../utils/whatsappHelper';
+import { useTranslation } from 'react-i18next';
+import { changeLanguage } from '../i18n';
+import { queueOfflineOrder, cacheCatalogData, getCachedCatalogData } from '../utils/offlineQueue';
 
 const normalizeMenuItem = (item = {}, index = 0) => {
   const safeItem = item || {};
@@ -79,7 +90,36 @@ const getGstinStateCode = (value) => {
 // ---------------------------------------------------------------------------
 // Main Dashboard Component
 // ---------------------------------------------------------------------------
+const formatKotTable = (tableNo, orderType) => {
+  if (!tableNo && !orderType) return 'Order';
+  const val = tableNo || orderType;
+  const str = String(val).trim();
+  if (/^\d+$/.test(str)) return `Table ${str}`;
+  if (str.startsWith('T-') || str.startsWith('Table') || str.startsWith('Takeaway') || str.startsWith('Delivery') || str.startsWith('Zomato') || str.startsWith('Swiggy') || str.startsWith('Online')) {
+    return str;
+  }
+  return `T-${str}`;
+};
+
+const getItemStation = (item) => {
+  if (item?.kitchenStation) return item.kitchenStation.toLowerCase();
+  const cat = String(item?.category || '').toLowerCase();
+  const name = String(item?.name || '').toLowerCase();
+
+  if (cat.includes('beverage') || cat.includes('drink') || cat.includes('shake') || cat.includes('bar') || name.includes('coffee') || name.includes('tea') || name.includes('soda') || name.includes('mojito')) {
+    return 'bar';
+  }
+  if (cat.includes('bread') || cat.includes('roti') || cat.includes('naan') || cat.includes('tandoor') || name.includes('roti') || name.includes('naan') || name.includes('kulcha') || name.includes('paratha')) {
+    return 'tandoor';
+  }
+  if (cat.includes('dessert') || cat.includes('sweet') || cat.includes('ice cream') || name.includes('halwa') || name.includes('jamun') || name.includes('cake')) {
+    return 'dessert';
+  }
+  return 'kitchen';
+};
+
 function Dashboard({ handleLogout }) {
+  const { t, i18n } = useTranslation();
   // Tabs: tables | billing | kot | online | analytics | payments | dayend | admin | waiters
   const [activeTab, setActiveTab] = useState('tables');
   const [tables, setTables] = useState([]);
@@ -94,8 +134,11 @@ function Dashboard({ handleLogout }) {
   const [selectedFloor, setSelectedFloor] = useState('Veg Floor');
 
   // Waiter Management
-  const WAITERS_LIST = ['Raju', 'Ramesh', 'Suresh', 'Amit', 'Sunil'];
-  const [selectedWaiter, setSelectedWaiter] = useState(WAITERS_LIST[0]);
+  const [waitersList, setWaitersList] = useState(['Raju', 'Ramesh', 'Suresh', 'Amit', 'Sunil']);
+  const [selectedWaiter, setSelectedWaiter] = useState('Raju');
+  const [customerLoyalty, setCustomerLoyalty] = useState(null);
+  const [pointsInput, setPointsInput] = useState('');
+  const [loyaltyMessage, setLoyaltyMessage] = useState('');
 
   // Active Context
   const [selectedTable, setSelectedTable] = useState(null);
@@ -117,6 +160,11 @@ function Dashboard({ handleLogout }) {
   const [compDiscount, setCompDiscount] = useState(0);
   const [partialPayment, setPartialPayment] = useState(0);
   const [splitBillCount, setSplitBillCount] = useState(2);
+  const [appliedCoupon, setAppliedCoupon] = useState(null);
+  const [couponInput, setCouponInput] = useState('');
+  const [couponLoading, setCouponLoading] = useState(false);
+  const [itemizedSplitModal, setItemizedSplitModal] = useState(null);
+  const [splitAssignments, setSplitAssignments] = useState({});
   const [selectedMergeTableId, setSelectedMergeTableId] = useState('');
   const [savedBills, setSavedBills] = useState(() => {
     try {
@@ -143,6 +191,7 @@ function Dashboard({ handleLogout }) {
   const [settleOrderModal, setSettleOrderModal] = useState(null);
   const [shiftTableModal, setShiftTableModal] = useState(null);
   const [qrModalTable, setQrModalTable] = useState(null);
+  const [showTableQrModal, setShowTableQrModal] = useState(false);
   const [modifierModalItem, setModifierModalItem] = useState(null);
 
 
@@ -169,19 +218,12 @@ function Dashboard({ handleLogout }) {
   };
 
   useEffect(() => {
+    requestNotificationPermission().catch(() => {});
     const socket = io('http://localhost:5000');
 
-    socket.on('newTableOrder', (orderData) => {
-      playNotificationSound();
-      setNotifications((current) => [{
-        id: `${Date.now()}-qr`,
-        title: 'New QR order',
-        message: `New order received for table ${orderData.tableNo || 'QR'}.`,
-        createdAt: new Date().toISOString()
-      }, ...current].slice(0, 30));
-    });
     const addNotification = (title, message) => {
       playNotificationSound();
+      showDesktopNotification(title, { body: message });
       setNotifications((current) => [{
         id: `${Date.now()}-${title}`,
         title,
@@ -189,6 +231,23 @@ function Dashboard({ handleLogout }) {
         createdAt: new Date().toISOString()
       }, ...current].slice(0, 30));
     };
+
+    socket.on('newTableOrder', (orderData) => {
+      addNotification('New QR Order', `New order received for table ${orderData.tableNo || 'QR'}.`);
+    });
+    socket.on('call-waiter', (data) => {
+      const reqMap = { water: '💧 Drinking Water', cutlery: '🍴 Cutlery/Napkins', bill: '🧾 Bill Request', waiter: '🙋 Waiter Assistance' };
+      const reqText = reqMap[data.requestType] || data.requestType;
+      addNotification(`🛎️ Call Waiter: Table ${data.tableNo}`, `${reqText}${data.customNote ? ` - Note: "${data.customNote}"` : ''}`);
+    });
+    socket.on('food-ready', (data) => {
+      addNotification(`🍳 Food Ready: Table ${data?.tableNo || data?.orderNumber || ''}`, 'Kitchen has finished preparing order. Ready for service!');
+    });
+    socket.on('order-status-update', (data) => {
+      if (data?.status === 'ready') {
+        addNotification(`🍳 Order #${data?.orderNumber || ''} Ready`, 'Kitchen has prepared the items.');
+      }
+    });
     socket.on('expense-updated', () => addNotification('Expense updated', 'A new expense was recorded.'));
     socket.on('online-order-updated', (data) => addNotification('Online order updated', data?.order?.status ? `Order status: ${data.order.status}.` : 'An online order changed.'));
     socket.on('payment-updated', () => addNotification('Payment updated', 'A payment or refund was recorded.'));
@@ -234,11 +293,27 @@ function Dashboard({ handleLogout }) {
   const [notifications, setNotifications] = useState([]);
   const [showNotifications, setShowNotifications] = useState(false);
 
-  const [kdsStatusFilter, setKdsStatusFilter] = useState('all');
-const [kdsSearchTerm, setKdsSearchTerm] = useState('');
-const [kdsHistoryOrder, setKdsHistoryOrder] = useState(null);
+  const [selectedRecipe, setSelectedRecipe] = useState(null);
+const [kdsStatusFilter, setKdsStatusFilter] = useState('all');
+  const [kdsStationFilter, setKdsStationFilter] = useState('all');
+  const [kdsSearchTerm, setKdsSearchTerm] = useState('');
+  const [kdsHistoryOrder, setKdsHistoryOrder] = useState(null);
+  const [kdsSoundEnabled, setKdsSoundEnabled] = useState(true);
+  const [show86Modal, setShow86Modal] = useState(false);
+  const [stockSearch, setStockSearch] = useState('');
+  const [showRecallModal, setShowRecallModal] = useState(false);
+  const [kdsCheckedItems, setKdsCheckedItems] = useState({});
 
-const [selectedRecipe, setSelectedRecipe] = useState(null);
+  const handleToggleStock = async (itemId) => {
+    try {
+      await api.put(`/menu/toggle/${itemId}`);
+      setMenuItems((prev) =>
+        prev.map((m) => (m._id === itemId || m.id === itemId ? { ...m, isAvailable: !m.isAvailable } : m))
+      );
+    } catch (err) {
+      alert('Stock status update failed.');
+    }
+  };
 
 
   const [onlineOrderConfig, setOnlineOrderConfig] = useState(() => {
@@ -457,17 +532,26 @@ const [selectedRecipe, setSelectedRecipe] = useState(null);
       return {};
     }
   });
+    const [soundActive, setSoundActive] = useState(!isAudioMuted());
+  useEffect(() => {
+    const handler = (e) => setSoundActive(!e.detail.audioMuted);
+    window.addEventListener('tamanna-audio-setting-changed', handler);
+    return () => window.removeEventListener('tamanna-audio-setting-changed', handler);
+  }, []);
+
   const currentUserRole = String(currentUser?.role || 'waiter').toLowerCase();
-  const roleAccessMap = useMemo(() => ({
-    admin: ['tables', 'billing', 'kot', 'online', 'waiters', 'analytics', 'reports', 'recipes', 'payments', 'dayend', 'shifts', 'admin', 'inventory', 'expenses', 'reservations', 'staff', 'customers'],
-    manager: ['tables', 'billing', 'kot', 'online', 'analytics', 'reports', 'recipes', 'payments', 'shifts', 'inventory', 'expenses', 'reservations', 'staff', 'customers'],
-    waiter: ['tables', 'billing', 'kot', 'payments', 'customers'],
-    cashier: ['tables', 'billing', 'kot', 'payments', 'dayend', 'shifts', 'customers'],
-    chef: ['kot'],
-    inventory_manager: ['inventory', 'expenses', 'analytics', 'reports', 'recipes', 'payments'],
-    delivery: ['tables', 'billing', 'online', 'payments', 'analytics']
-  }), []);
-  const allowedTabs = roleAccessMap[currentUserRole] || roleAccessMap.admin;
+  const [rbacMatrix, setRbacMatrix] = useState(() => getActiveRbacMatrix());
+
+  useEffect(() => {
+    const handleRbacUpdate = (e) => {
+      if (e?.detail) setRbacMatrix(e.detail);
+      else setRbacMatrix(getActiveRbacMatrix());
+    };
+    window.addEventListener('tamanna-rbac-updated', handleRbacUpdate);
+    return () => window.removeEventListener('tamanna-rbac-updated', handleRbacUpdate);
+  }, []);
+
+  const allowedTabs = rbacMatrix[currentUserRole] || rbacMatrix.admin || [];
   const canAccessTab = useCallback((tab) => allowedTabs.includes(tab), [allowedTabs]);
 
   useEffect(() => {
@@ -531,8 +615,21 @@ const [selectedRecipe, setSelectedRecipe] = useState(null);
       const ordersData = Array.isArray(resOrders?.data?.data) ? resOrders.data.data : Array.isArray(resOrders?.data) ? resOrders.data : [];
       const onlineOrdersData = Array.isArray(resOnlineOrders?.data?.data) ? resOnlineOrders.data.data : Array.isArray(resOnlineOrders?.data) ? resOnlineOrders.data : [];
 
-      const normalizedTables = tablesData.map(normalizeTable).filter((table) => !isNonVegFloor(table));
-      const normalizedMenuItems = menuData.map(normalizeMenuItem);
+      let normalizedTables = tablesData.map(normalizeTable).filter((table) => !isNonVegFloor(table));
+      let normalizedMenuItems = menuData.map(normalizeMenuItem);
+
+      if (normalizedTables.length > 0) {
+        cacheCatalogData('tables', normalizedTables);
+      } else {
+        const cachedT = await getCachedCatalogData('tables');
+        if (cachedT && cachedT.length > 0) normalizedTables = cachedT;
+      }
+      if (normalizedMenuItems.length > 0) {
+        cacheCatalogData('menu', normalizedMenuItems);
+      } else {
+        const cachedM = await getCachedCatalogData('menu');
+        if (cachedM && cachedM.length > 0) normalizedMenuItems = cachedM;
+      }
 
       setTables(normalizedTables);
       setMenuItems(normalizedMenuItems);
@@ -543,12 +640,29 @@ const [selectedRecipe, setSelectedRecipe] = useState(null);
       const currentDayEnd = resDayEnd?.data?.data || null;
       setDayEndRecord(currentDayEnd);
       if (currentDayEnd) setDayEndOpeningCash(String(currentDayEnd.openingCash ?? ''));
+
+      api.get('/staff').then((res) => {
+        const staff = Array.isArray(res.data) ? res.data : [];
+        const activeStaff = staff.filter(s => s.status !== 'Terminated');
+        const waiters = activeStaff
+          .filter(s => /waiter|captain/i.test(s.role || ''))
+          .map(s => s.name);
+        const list = waiters.length > 0 ? waiters : activeStaff.map(s => s.name);
+        if (list.length > 0) {
+          setWaitersList(list);
+          setSelectedWaiter(prev => (list.includes(prev) ? prev : list[0]));
+        }
+      }).catch(() => {});
     } catch (err) {
-      console.error('Data Load Error:', err);
-      setTables([]);
-      setMenuItems([]);
+      console.error('Data Load Error (falling back to offline cache):', err);
+      const cachedT = await getCachedCatalogData('tables');
+      const cachedM = await getCachedCatalogData('menu');
+      if (cachedT && cachedT.length > 0) setTables(cachedT);
+      else setTables([]);
+      if (cachedM && cachedM.length > 0) setMenuItems(cachedM);
+      else setMenuItems([]);
       setOrders([]);
-      setLoadError('Could not connect to backend. No local sample data is available.');
+      setLoadError('Working in Offline Mode. Showing locally cached tables & menu.');
     } finally {
       setLoading(false);
     }
@@ -841,8 +955,11 @@ const [selectedRecipe, setSelectedRecipe] = useState(null);
     const subTotal = allCombined.reduce((sum, i) => sum + (Number(i.price) * Number(i.quantity || 1)), 0);
     const discountPercentAmt = subTotal * (Number(discount || 0) / 100);
     const customDiscountAmt = Number(customDiscount || 0);
-    const serviceChargeAmt = (subTotal - discountPercentAmt - customDiscountAmt) * (Number(serviceCharge || 0) / 100);
-    const taxableBeforeGst = Math.max(0, subTotal - discountPercentAmt - customDiscountAmt + serviceChargeAmt);
+    const couponDiscountAmt = appliedCoupon ? Number(appliedCoupon.discountAmt || 0) : 0;
+    const totalDiscountAmt = discountPercentAmt + customDiscountAmt + couponDiscountAmt;
+
+    const serviceChargeAmt = (subTotal - totalDiscountAmt) * (Number(serviceCharge || 0) / 100);
+    const taxableBeforeGst = Math.max(0, subTotal - totalDiscountAmt + serviceChargeAmt);
     const gstPercent = Number(gstRate || 0);
     const cgst = taxableBeforeGst * (gstPercent / 2 / 100);
     const sgst = taxableBeforeGst * (gstPercent / 2 / 100);
@@ -855,7 +972,8 @@ const [selectedRecipe, setSelectedRecipe] = useState(null);
 
     return {
       subTotal,
-      discountAmt: discountPercentAmt + customDiscountAmt,
+      discountAmt: totalDiscountAmt,
+      couponDiscountAmt,
       tax,
       cgst,
       sgst,
@@ -867,6 +985,60 @@ const [selectedRecipe, setSelectedRecipe] = useState(null);
       totalItemCount: allCombined.length,
       taxableBeforeGst
     };
+  };
+
+  const handleApplyCoupon = async () => {
+    if (!couponInput.trim()) return;
+    try {
+      setCouponLoading(true);
+      const totals = getBillTotals();
+      const res = await api.post('/coupons/apply', {
+        code: couponInput.trim(),
+        orderAmount: totals.subTotal,
+        customerPhone
+      });
+      if (res.data?.success) {
+        setAppliedCoupon({
+          code: res.data.code,
+          discountAmt: res.data.discountAmt,
+          message: res.data.message
+        });
+        setCouponInput('');
+        playNotificationSound();
+        alert(res.data.message);
+      }
+    } catch (err) {
+      alert(err.response?.data?.message || 'Failed to apply coupon');
+    } finally {
+      setCouponLoading(false);
+    }
+  };
+
+  const handleRemoveCoupon = () => {
+    setAppliedCoupon(null);
+  };
+
+  const handleSendWhatsApp = (orderParam = null) => {
+    const orderToUse = orderParam || currentRunningOrder || {
+      items: cart,
+      subTotal: getBillTotals().subTotal,
+      discountAmt: getBillTotals().discountAmt,
+      tax: getBillTotals().tax,
+      grandTotal: getBillTotals().grandTotal,
+      tableLabel: selectedTable ? (selectedTable.tableNo || selectedTable.tableNumber) : orderType,
+      waiterName: selectedWaiter,
+      customerName,
+      customerPhone,
+      paymentMode,
+      couponCode: appliedCoupon?.code || ''
+    };
+
+    if (!orderToUse || !orderToUse.items || orderToUse.items.length === 0) {
+      alert('Cannot send WhatsApp bill: Cart or Order is empty!');
+      return;
+    }
+
+    sendWhatsAppBill(orderToUse, restaurantSettings, customerPhone);
   };
 
   // -------------------------------------------------------------------------
@@ -993,6 +1165,14 @@ const [selectedRecipe, setSelectedRecipe] = useState(null);
       setCart([]);
       loadInitialData();
     } catch (err) {
+      if (!navigator.onLine || !err.response) {
+        const offRes = await queueOfflineOrder(orderPayload);
+        if (offRes && offRes.success) {
+          alert(`📡 [Offline Mode] Network unavailable! KOT & Order queued locally.\nClient ID: ${offRes.clientOrderId}\nWill automatically sync with server when network reconnects.`);
+          setCart([]);
+          return;
+        }
+      }
       alert('Order/KOT failed: ' + (err.response?.data?.message || err.message));
     }
   };
@@ -1062,6 +1242,14 @@ const [selectedRecipe, setSelectedRecipe] = useState(null);
         alert('📋');
       }
     } catch (err) {
+      if (!navigator.onLine || !err.response) {
+        const offRes = await queueOfflineOrder(orderPayload);
+        if (offRes && offRes.success) {
+          alert(`📡 [Offline Mode] Network unavailable! Order queued locally.\nClient ID: ${offRes.clientOrderId}\nWill automatically sync with server when network reconnects.`);
+          setCart([]);
+          return;
+        }
+      }
       alert('Order failed: ' + (err.response?.data?.message || err.message));
     }
   };
@@ -1501,54 +1689,118 @@ const handleRestoreSavedBill = (savedBill) => {
   alert(`✅ Saved bill restored: ${savedBill.title}`);
 };
 
-const handleMergeTables = () => {
+const handleMergeTables = async () => {
   if (!selectedTable || !selectedMergeTableId || selectedTable._id === selectedMergeTableId) {
     alert('Select a valid table to merge.');
     return;
   }
 
-  setTables((prev) => prev.map((table) => {
-    if (table._id === selectedTable._id || table._id === selectedMergeTableId) {
-      return {
-        ...table,
-        status: 'occupied',
-        mergedWith: table._id === selectedTable._id ? selectedMergeTableId : selectedTable._id
-      };
+  try {
+    const res = await api.put(`/tables/merge/${selectedTable._id}/${selectedMergeTableId}`);
+    if (res.data?.success) {
+      alert(`✅ ${res.data.message}`);
+      setSelectedMergeTableId('');
+      loadInitialData();
     }
-    return table;
-  }));
+  } catch (err) {
+    console.error('Failed to merge tables:', err);
+    alert(err.response?.data?.message || 'Failed to merge tables');
+  }
+};
 
-  const mergedTable = tables.find((table) => table._id === selectedMergeTableId);
-  setTables((prev) => prev.map((table) =>
-    table._id === selectedTable._id || table._id === selectedMergeTableId
-      ? { ...table, mergedWith: table._id === selectedTable._id ? selectedMergeTableId : selectedTable._id }
-      : table
-  ));
-  alert(`✅ Table ${selectedTable.tableNo || selectedTable.tableNumber} aur ${mergedTable?.tableNo || 'selected table'} merge kar diya gaya.`);
-  setSelectedMergeTableId('');
+const handleUnmergeTable = async (tableId) => {
+  if (!tableId) return;
+  try {
+    const res = await api.put(`/tables/unmerge/${tableId}`);
+    if (res.data?.success) {
+      alert(`✅ ${res.data.message}`);
+      loadInitialData();
+    }
+  } catch (err) {
+    console.error('Failed to unmerge table:', err);
+    alert(err.response?.data?.message || 'Failed to unmerge table');
+  }
+};
+
+const handlePhoneInputChange = async (e) => {
+  const val = e.target.value.replace(/\D/g, '').slice(0, 10);
+  setCustomerPhone(val);
+  setLoyaltyMessage('');
+  if (val.length === 10) {
+    try {
+      const res = await api.get(`/customers/${val}`);
+      if (res.data?.data) {
+        const cust = res.data.data;
+        if (cust.name && cust.name !== 'Guest Customer') setCustomerName(cust.name);
+        if (cust.gstin) {
+          setCustomerGstin(cust.gstin);
+          const state = getGstinStateCode(cust.gstin);
+          if (state) setPlaceOfSupply(state);
+        }
+        setCustomerLoyalty(cust);
+        if (cust.loyaltyPoints > 0) {
+          setLoyaltyMessage(`⭐ ${cust.loyaltyPoints} Loyalty Points available`);
+        }
+      } else {
+        setCustomerLoyalty(null);
+      }
+    } catch {
+      setCustomerLoyalty(null);
+    }
+  } else {
+    setCustomerLoyalty(null);
+  }
+};
+
+const handleRedeemLoyaltyPoints = async () => {
+  if (!customerPhone || !customerLoyalty) return;
+  const pts = Number(pointsInput || customerLoyalty.loyaltyPoints || 0);
+  if (!pts || pts < 10) {
+    alert('Minimum 10 points required to redeem.');
+    return;
+  }
+  if (pts > (customerLoyalty.loyaltyPoints || 0)) {
+    alert(`Cannot redeem more than ${customerLoyalty.loyaltyPoints} points.`);
+    return;
+  }
+
+  try {
+    const res = await api.post(`/customers/${customerPhone}/redeem-points`, { points: pts });
+    if (res.data?.success) {
+      const disc = res.data.data?.discountAmount || pts;
+      setCustomDiscount(prev => prev + disc);
+      setCustomerLoyalty(prev => ({
+        ...prev,
+        loyaltyPoints: res.data.data?.loyaltyPoints ?? (prev.loyaltyPoints - pts)
+      }));
+      setLoyaltyMessage(`✅ Redeemed ${pts} points for ₹${disc} discount!`);
+      setPointsInput('');
+    }
+  } catch (err) {
+    alert(err.response?.data?.message || 'Failed to redeem loyalty points.');
+  }
 };
 // Floor tables
+const normalizeFloorKey = (value) => String(value || '')
+  .trim()
+  .toLowerCase()
+  .replace(/\s+/g, ' ')
+  .replace(/[_-]/g, ' ');
+
 const floorTables = tables.filter((t) => {
-  const dbFloor = String(t.floor || 'Floor 1').trim().toLowerCase();
-  const currentFloor = String(selectedFloor || 'Floor 1').trim().toLowerCase();
+  const dbFloor = normalizeFloorKey(t.floor || 'Floor 1');
+  const currentFloor = normalizeFloorKey(selectedFloor || 'Veg Floor');
 
-  // UI name -> Database floor name mapping
-  if (currentFloor === 'veg floor') {
-    return dbFloor === 'floor 1';
-  }
+  const mapping = {
+    'veg floor': ['veg floor', 'floor 1'],
+    'birthday party zone': ['birthday party zone', 'party floor', 'floor 2'],
+    'non veg floor': ['non veg floor'],
+    'floor 1': ['veg floor', 'floor 1'],
+    'floor 2': ['birthday party zone', 'party floor', 'floor 2']
+  };
 
-  if (
-    currentFloor === 'birthday party zone' ||
-    currentFloor === 'party floor'
-  ) {
-    return (
-      dbFloor === 'floor 2' ||
-      dbFloor === 'birthday party zone' ||
-      dbFloor === 'party floor'
-    );
-  }
-
-  return dbFloor === currentFloor;
+  const allowedFloors = mapping[currentFloor] || [currentFloor];
+  return allowedFloors.includes(dbFloor);
 });
 
 // Status counts for Floor plan summary
@@ -1681,9 +1933,71 @@ const topSellingItem = Object.entries(itemSalesSummary).sort((a, b) => b[1] - a[
     </div>
   </div>
 
-  <div style={{ fontSize: '11px', color: '#64748b', marginBottom: '16px' }}>
+  <div style={{ fontSize: '11px', color: '#64748b', marginBottom: '12px' }}>
     Cashier: <b>{currentUser?.name || 'Admin'}</b> · Shift Open
   </div>
+
+  {/* Language Switcher & KDS Quick Launch */}
+  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 8px', background: '#f8fafc', borderRadius: '8px', border: '1px solid #e2e8f0', marginBottom: '10px' }}>
+    <span style={{ fontSize: '11px', fontWeight: 600, color: '#475569' }}>🌐 Lang:</span>
+    <div style={{ display: 'flex', gap: '4px' }}>
+      <button
+        type="button"
+        onClick={() => changeLanguage('en')}
+        style={{
+          padding: '2px 7px',
+          fontSize: '11px',
+          fontWeight: i18n.language === 'en' ? 700 : 500,
+          backgroundColor: i18n.language === 'en' ? '#ff4d00' : '#fff',
+          color: i18n.language === 'en' ? '#fff' : '#64748b',
+          border: '1px solid #cbd5e1',
+          borderRadius: '5px',
+          cursor: 'pointer'
+        }}
+      >
+        EN
+      </button>
+      <button
+        type="button"
+        onClick={() => changeLanguage('hi')}
+        style={{
+          padding: '2px 7px',
+          fontSize: '11px',
+          fontWeight: i18n.language === 'hi' ? 700 : 500,
+          backgroundColor: i18n.language === 'hi' ? '#ff4d00' : '#fff',
+          color: i18n.language === 'hi' ? '#fff' : '#64748b',
+          border: '1px solid #cbd5e1',
+          borderRadius: '5px',
+          cursor: 'pointer'
+        }}
+      >
+        हिन्दी
+      </button>
+    </div>
+  </div>
+
+  <a
+    href="/kitchen"
+    target="_blank"
+    rel="noreferrer"
+    style={{
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: '6px',
+      padding: '7px 10px',
+      backgroundColor: '#0f172a',
+      color: '#38bdf8',
+      borderRadius: '8px',
+      textDecoration: 'none',
+      fontSize: '11px',
+      fontWeight: 700,
+      marginBottom: '14px',
+      border: '1px solid #1e293b'
+    }}
+  >
+    📺 {t('kds.title', 'Kitchen Display (KDS)')} ↗
+  </a>
 
   {/* Real-Time clock */}
   <div style={{
@@ -1700,6 +2014,30 @@ const topSellingItem = Object.entries(itemSalesSummary).sort((a, b) => b[1] - a[
     </div>
     <div style={{ fontSize: '11px', opacity: 0.9, marginTop: '4px' }}>
       {currentTime.toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}
+    </div>
+    <div style={{ display: 'flex', justifyContent: 'center', marginTop: '8px' }}>
+      <button
+        onClick={() => {
+          const next = !isAudioMuted();
+          setAudioMuted(next);
+          setSoundActive(!next);
+          if (!next) playTone('success');
+        }}
+        style={{
+          background: 'rgba(255,255,255,0.22)',
+          border: '1px solid rgba(255,255,255,0.45)',
+          borderRadius: '14px',
+          color: '#fff',
+          fontSize: '11px',
+          padding: '2px 10px',
+          cursor: 'pointer',
+          fontWeight: 'bold',
+          transition: 'all 0.2s ease'
+        }}
+        title={soundActive ? 'Audio Alerts Active (Click to Mute)' : 'Audio Alerts Muted (Click to Unmute)'}
+      >
+        {soundActive ? '🔊 Audio ON' : '🔇 Audio Muted'}
+      </button>
     </div>
   </div>
 
@@ -1847,8 +2185,8 @@ const topSellingItem = Object.entries(itemSalesSummary).sort((a, b) => b[1] - a[
 
     {canAccessTab('reservations') && (
       <button
+        style={{ ...(activeTab === 'reservations' ? ui.navBtnActive : ui.navBtn), textAlign: 'left', width: '100%' }}
         onClick={() => setActiveTab('reservations')}
-        className={`px-3 py-2 rounded-lg text-sm font-medium text-left ${activeTab === 'reservations' ? 'bg-blue-600 text-white' : 'text-gray-600 hover:bg-gray-100'}`}
       >
         📅 Reservations
       </button>
@@ -1856,15 +2194,46 @@ const topSellingItem = Object.entries(itemSalesSummary).sort((a, b) => b[1] - a[
 
     {canAccessTab('staff') && (
       <button 
+        style={{ ...(activeTab === 'staff' ? ui.navBtnActive : ui.navBtn), textAlign: 'left', width: '100%' }}
         onClick={() => setActiveTab('staff')}
-        className={`px-3 py-2 rounded-lg text-sm font-medium text-left flex items-center gap-2 ${activeTab === 'staff' ? 'bg-blue-600 text-white' : 'text-gray-600 hover:bg-gray-100'}`}
       >
         👥 Staff & Payroll
       </button>
     )}
-    
+
+    {canAccessTab('audit') && (
+      <button 
+        style={{ ...(activeTab === 'audit' ? ui.navBtnActive : ui.navBtn), textAlign: 'left', width: '100%' }}
+        onClick={() => setActiveTab('audit')}
+      >
+        🛡️ Audit Trail & Voice
+      </button>
+    )}
 
     <div style={{ borderTop: '1px solid #eef1f5', margin: '10px 0' }} />
+
+    <a
+      href="/waiter"
+      target="_blank"
+      rel="noopener noreferrer"
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: '8px',
+        padding: '10px 14px',
+        borderRadius: '8px',
+        background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
+        color: '#fff',
+        fontWeight: 'bold',
+        fontSize: '13px',
+        textDecoration: 'none',
+        boxShadow: '0 2px 6px rgba(16, 185, 129, 0.3)',
+        marginBottom: '6px'
+      }}
+    >
+      📱 Waiter / Captain App ↗
+    </a>
 
     <button style={{ ...ui.logoutBtn, textAlign: 'left', width: '100%' }} onClick={handleLogout}>
       Exit
@@ -1894,6 +2263,7 @@ const topSellingItem = Object.entries(itemSalesSummary).sort((a, b) => b[1] - a[
       {activeTab === 'reports' && <ReportsAndCosting />}
 
       {activeTab === 'recipes' && <RecipeBuilder />}
+      {activeTab === 'audit' && <AuditLogViewer />}
       {activeTab === 'shifts' && <CashierShift />}
 
       {activeTab === 'customers' && <CustomerCRM />}
@@ -1932,6 +2302,21 @@ const topSellingItem = Object.entries(itemSalesSummary).sort((a, b) => b[1] - a[
           }}
         >
           🎉 Birthday Party Zone
+        </button>
+        <button
+          onClick={() => setShowTableQrModal(true)}
+          style={{
+            ...ui.floorTabBtn,
+            backgroundColor: '#0f172a',
+            color: '#fff',
+            border: '1px solid #1e293b',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '6px'
+          }}
+          title="Generate printable acrylic table tent QR standee cards"
+        >
+          <span>🖨️📱</span> Table QR Standees
         </button>
       </div>
 
@@ -2029,6 +2414,14 @@ const topSellingItem = Object.entries(itemSalesSummary).sort((a, b) => b[1] - a[
           onTransferSuccess={() => {
             loadInitialData();
           }}
+        />
+      )}
+
+      {/* --- TABLE QR STANDEES GENERATOR MODAL --- */}
+      {showTableQrModal && (
+        <TableQRGeneratorModal
+          tables={tables}
+          onClose={() => setShowTableQrModal(false)}
         />
       )}
 
@@ -2239,7 +2632,7 @@ const topSellingItem = Object.entries(itemSalesSummary).sort((a, b) => b[1] - a[
                     <input
                       placeholder="Customer Phone"
                       value={customerPhone}
-                      onChange={(e) => setCustomerPhone(e.target.value)}
+                      onChange={handlePhoneInputChange}
                       style={{ ...ui.inputField, width: '150px', padding: '8px 12px' }}
                     />
                     <input
@@ -2272,10 +2665,43 @@ const topSellingItem = Object.entries(itemSalesSummary).sort((a, b) => b[1] - a[
                       style={{ padding: '8px 12px', borderRadius: '8px', border: '1px solid #cbd5e1', fontSize: '12px', fontWeight: 'bold', backgroundColor: '#fff', color: '#0f172a', minWidth: '100px' }}
                       title="Select Waiter"
                     >
-                      {WAITERS_LIST.map(w => <option key={w} value={w}>👨‍🍳 {w}</option>)}
+                      {waitersList.map(w => <option key={w} value={w}>👨‍🍳 {w}</option>)}
                     </select>
                   </div>
                 </div>
+
+                {customerLoyalty && (
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: '#ecfdf5', border: '1px solid #a7f3d0', padding: '6px 12px', borderRadius: '8px', marginBottom: '10px', fontSize: '12px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <span style={{ fontWeight: 'bold', color: '#065f46' }}>👤 {customerLoyalty.name} ({customerLoyalty.membershipTier || 'Regular'})</span>
+                      <span style={{ color: '#047857' }}>• {customerLoyalty.loyaltyPoints || 0} Loyalty Points available</span>
+                    </div>
+                    {customerLoyalty.loyaltyPoints >= 10 && (
+                      <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                        <input
+                          type="number"
+                          placeholder="Points"
+                          value={pointsInput}
+                          onChange={(e) => setPointsInput(e.target.value)}
+                          max={customerLoyalty.loyaltyPoints}
+                          style={{ width: '75px', padding: '3px 6px', fontSize: '11px', borderRadius: '5px', border: '1px solid #cbd5e1' }}
+                        />
+                        <button
+                          type="button"
+                          onClick={handleRedeemLoyaltyPoints}
+                          style={{ padding: '4px 10px', fontSize: '11px', background: '#059669', color: '#fff', border: 0, borderRadius: '5px', fontWeight: 'bold', cursor: 'pointer' }}
+                        >
+                          Redeem
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+                {loyaltyMessage && (
+                  <div style={{ fontSize: '11px', color: loyaltyMessage.includes('✅') ? '#059669' : '#0284c7', marginBottom: '8px', fontWeight: 600 }}>
+                    {loyaltyMessage}
+                  </div>
+                )}
 
                 {orderType === 'Delivery' && (
                   <div style={{ marginBottom: '12px' }}>
@@ -2806,17 +3232,31 @@ const topSellingItem = Object.entries(itemSalesSummary).sort((a, b) => b[1] - a[
                       </button>
                     </div>
 
-                    <div style={{ display: 'flex', gap: '6px', alignItems: 'center', marginTop: '8px' }}>
-                      <select value={selectedMergeTableId} onChange={(e) => setSelectedMergeTableId(e.target.value)} style={{ flex: 1, padding: '6px 8px', borderRadius: '6px', border: '1px solid #cbd5e1', fontSize: '11px', background: '#fff' }}>
-                        <option value="">Select table to merge</option>
-                        {tables.filter((t) => t._id !== selectedTable?._id).map((table) => (
-                          <option key={table._id} value={table._id}>{table.tableNo || table.tableNumber}</option>
-                        ))}
-                      </select>
-                      <button onClick={handleMergeTables} style={{ background: '#10b981', color: '#fff', border: 'none', borderRadius: '6px', padding: '6px 10px', fontSize: '10px', fontWeight: 'bold', cursor: 'pointer' }}>
-                        Merge
-                      </button>
-                    </div>
+                    {selectedTable?.mergedWith ? (
+                      <div style={{ display: 'flex', gap: '6px', alignItems: 'center', marginTop: '8px', background: '#fef3c7', padding: '6px 8px', borderRadius: '6px', border: '1px solid #fde68a' }}>
+                        <span style={{ fontSize: '11px', color: '#92400e', fontWeight: 'bold', flex: 1 }}>
+                          🔗 Merged with T-{tables.find(t => t._id === selectedTable.mergedWith)?.tableNo || 'Table'}
+                        </span>
+                        <button
+                          onClick={() => handleUnmergeTable(selectedTable._id)}
+                          style={{ background: '#ef4444', color: '#fff', border: 'none', borderRadius: '6px', padding: '4px 8px', fontSize: '10px', fontWeight: 'bold', cursor: 'pointer' }}
+                        >
+                          Unmerge
+                        </button>
+                      </div>
+                    ) : (
+                      <div style={{ display: 'flex', gap: '6px', alignItems: 'center', marginTop: '8px' }}>
+                        <select value={selectedMergeTableId} onChange={(e) => setSelectedMergeTableId(e.target.value)} style={{ flex: 1, padding: '6px 8px', borderRadius: '6px', border: '1px solid #cbd5e1', fontSize: '11px', background: '#fff' }}>
+                          <option value="">Select table to merge</option>
+                          {tables.filter((t) => t._id !== selectedTable?._id && !t.mergedWith).map((table) => (
+                            <option key={table._id} value={table._id}>Table {table.tableNo || table.tableNumber}</option>
+                          ))}
+                        </select>
+                        <button onClick={handleMergeTables} style={{ background: '#10b981', color: '#fff', border: 'none', borderRadius: '6px', padding: '6px 10px', fontSize: '10px', fontWeight: 'bold', cursor: 'pointer' }}>
+                          Merge
+                        </button>
+                      </div>
+                    )}
 
                     <div style={{ marginTop: '8px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '6px' }}>
                       <span style={{ fontSize: '10px', color: '#64748b' }}>Split Bill</span>
@@ -2832,6 +3272,70 @@ const topSellingItem = Object.entries(itemSalesSummary).sort((a, b) => b[1] - a[
                         </div>
                       ))}
                     </div>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!currentRunningOrder || (currentRunningOrder.items || []).length < 2) {
+                          alert('Please select an active table with at least 2 items to split by dish!');
+                          return;
+                        }
+                        const initialAssignments = {};
+                        (currentRunningOrder.items || []).forEach((_, idx) => {
+                          initialAssignments[idx] = 'A';
+                        });
+                        setSplitAssignments(initialAssignments);
+                        setItemizedSplitModal(currentRunningOrder);
+                      }}
+                      style={{
+                        marginTop: '8px',
+                        width: '100%',
+                        padding: '6px',
+                        background: '#eff6ff',
+                        border: '1px solid #bfdbfe',
+                        color: '#1d4ed8',
+                        borderRadius: '6px',
+                        fontSize: '11px',
+                        fontWeight: 'bold',
+                        cursor: 'pointer'
+                      }}
+                    >
+                      🔀 Itemized Split by Dish
+                    </button>
+                  </div>
+
+                  {/* Promo Coupon Code Field */}
+                  <div style={{ marginBottom: '8px', padding: '8px', background: '#f8fafc', borderRadius: '8px', border: '1px dashed #cbd5e1' }}>
+                    <div style={{ fontSize: '10px', fontWeight: 'bold', color: '#475569', marginBottom: '4px', textTransform: 'uppercase' }}>
+                      🎟️ Promo Coupon Code
+                    </div>
+                    {appliedCoupon ? (
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: '#dcfce7', padding: '6px 10px', borderRadius: '6px', border: '1px solid #86efac' }}>
+                        <div>
+                          <span style={{ fontWeight: '800', fontSize: '12px', color: '#15803d' }}>{appliedCoupon.code}</span>
+                          <span style={{ fontSize: '11px', color: '#166534', marginLeft: '6px', fontWeight: 'bold' }}>(-₹{appliedCoupon.discountAmt.toFixed(2)})</span>
+                        </div>
+                        <button type="button" onClick={handleRemoveCoupon} style={{ background: 'transparent', border: 0, color: '#dc2626', fontWeight: 'bold', cursor: 'pointer', fontSize: '14px' }}>✕</button>
+                      </div>
+                    ) : (
+                      <div style={{ display: 'flex', gap: '4px' }}>
+                        <input
+                          type="text"
+                          placeholder="e.g. FLAT50, WELCOME10"
+                          value={couponInput}
+                          onChange={(e) => setCouponInput(e.target.value.toUpperCase())}
+                          style={{ flex: 1, padding: '6px 8px', borderRadius: '6px', border: '1px solid #cbd5e1', fontSize: '11px', background: '#fff' }}
+                        />
+                        <button
+                          type="button"
+                          onClick={handleApplyCoupon}
+                          disabled={couponLoading || !couponInput.trim()}
+                          style={{ background: '#2563eb', color: '#fff', border: 0, borderRadius: '6px', padding: '6px 12px', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer' }}
+                        >
+                          {couponLoading ? '...' : 'Apply'}
+                        </button>
+                      </div>
+                    )}
                   </div>
 
                   <div style={ui.billRow}><span>Subtotal</span><span>₹{subTotal.toFixed(2)}</span></div>
@@ -2961,6 +3465,34 @@ const topSellingItem = Object.entries(itemSalesSummary).sort((a, b) => b[1] - a[
                           </button>
                         </div>
 
+                        {/* WhatsApp Bill Action */}
+                        <button
+                          type="button"
+                          onClick={() => handleSendWhatsApp()}
+                          disabled={!currentRunningOrder && cart.length === 0}
+                          style={{
+                            width: '100%',
+                            padding: '9px',
+                            background: 'linear-gradient(135deg, #25d366 0%, #128c7e 100%)',
+                            color: '#fff',
+                            border: 'none',
+                            borderRadius: '6px',
+                            fontWeight: 'bold',
+                            fontSize: '12px',
+                            cursor: (!currentRunningOrder && cart.length === 0) ? 'not-allowed' : 'pointer',
+                            opacity: (!currentRunningOrder && cart.length === 0) ? 0.5 : 1,
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            gap: '6px',
+                            boxShadow: '0 2px 6px rgba(37, 211, 102, 0.25)',
+                            marginTop: '2px'
+                          }}
+                        >
+                          <span>📲</span>
+                          <span>Send WhatsApp Bill</span>
+                        </button>
+
                         {/* Helper note explaining why Settle is locked */}
                         {currentRunningOrder && !isOrderReadyToSettle && (
                           <div style={{ fontSize: '10px', color: '#b45309', textAlign: 'center', backgroundColor: '#fffbeb', border: '1px solid #fde68a', borderRadius: '6px', padding: '5px 8px' }}>
@@ -3021,529 +3553,726 @@ const topSellingItem = Object.entries(itemSalesSummary).sort((a, b) => b[1] - a[
             </div>
           )}
 
+              {/* ================================================================= */}
+       {/* TAB 3: KITCHEN DISPLAY SYSTEM (KDS) & ORDERS                      */}
        {/* ================================================================= */}
-   {/* TAB 3: KITCHEN DISPLAY SYSTEM (KDS) & ORDERS                      */}
-   {/* ================================================================= */}
-   {activeTab === 'kot' && (
-     <div style={{ padding: '20px', flex: 1, overflowY: 'auto', backgroundColor: '#f8fafc' }}>
-       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', flexWrap: 'wrap', gap: '10px' }}>
-         <div>
-           <h2 style={{ margin: 0, fontSize: '20px', fontWeight: 'bold', color: '#0f172a' }}>
-             👨‍🍳 Kitchen Display System (KDS) - Advanced
-           </h2>
-           <p style={{ margin: '2px 0 0 0', fontSize: '12px', color: '#64748b' }}>
-             Live kitchen tickets with item-level tracking, VIP priority & delay alerts.
-           </p>
-         </div>
-         <button
-           onClick={loadInitialData}
-           style={{ padding: '8px 14px', backgroundColor: '#fc4f1a', color: '#fff', border: 'none', borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer', fontSize: '12px' }}
-         >
-           🔄 Refresh
-         </button>
-       </div>
+       {activeTab === 'kot' && (
+         <div style={{ padding: '20px', flex: 1, overflowY: 'auto', backgroundColor: '#f8fafc' }}>
+           {/* Top Bar with Title, 86 Stock Out, Bell Sound, Recall, Refresh */}
+           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', flexWrap: 'wrap', gap: '10px' }}>
+             <div>
+               <h2 style={{ margin: 0, fontSize: '20px', fontWeight: 'bold', color: '#0f172a' }}>
+                 👨‍🍳 Kitchen Display System (KDS) - Advanced
+               </h2>
+               <p style={{ margin: '2px 0 0 0', fontSize: '12px', color: '#64748b' }}>
+                 Live kitchen tickets with multi-station routing, item-level tracking, 86 stock control & delay alerts.
+               </p>
+             </div>
 
-       {/* ---- Status Filter Tabs ---- */}
-       <div style={{ display: 'flex', gap: '8px', marginBottom: '12px', flexWrap: 'wrap' }}>
-         {['all', 'placed', 'preparing', 'ready', 'completed'].map((st) => {
-           const count = st === 'all'
-             ? orders.filter(o => o.orderStatus !== 'cancelled').length
-             : orders.filter(o => o.orderStatus === st).length;
-           const isActive = kdsStatusFilter === st;
-           const labelMap = { all: '🔥 Active', placed: '🆕 Placed', preparing: '🍳 Preparing', ready: '✅ Ready', completed: '💳 Completed' };
-           return (
-             <button
-               key={st}
-               onClick={() => setKdsStatusFilter(st)}
-               style={{
-                 padding: '8px 14px',
-                 borderRadius: '20px',
-                 border: isActive ? '2px solid #fc4f1a' : '1px solid #e2e8f0',
-                 backgroundColor: isActive ? '#fff7ed' : '#ffffff',
-                 color: isActive ? '#fc4f1a' : '#475569',
-                 fontWeight: 'bold',
-                 fontSize: '12px',
-                 cursor: 'pointer',
-                 display: 'flex',
-                 alignItems: 'center',
-                 gap: '6px'
-               }}
-             >
-               {labelMap[st]}
-               <span style={{
-                 backgroundColor: isActive ? '#fc4f1a' : '#e2e8f0',
-                 color: isActive ? '#fff' : '#475569',
-                 borderRadius: '10px',
-                 padding: '1px 7px',
-                 fontSize: '11px'
-               }}>
-                 {count}
-               </span>
-             </button>
-           );
-         })}
-       </div>
-
-       {/* ---- Search Bar ---- */}
-       <div style={{ marginBottom: '16px' }}>
-         <input
-           type="text"
-           value={kdsSearchTerm}
-           onChange={(e) => setKdsSearchTerm(e.target.value)}
-           placeholder="🔍 Search by table no, item name, KOT number, waiter..."
-           style={{
-             width: '100%',
-             padding: '10px 14px',
-             borderRadius: '8px',
-             border: '1px solid #e2e8f0',
-             fontSize: '13px',
-             outline: 'none',
-             boxSizing: 'border-box'
-           }}
-         />
-       </div>
-
-       {/* Kitchen Tickets Grid */}
-       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: '14px' }}>
-         {orders
-           .filter(o => o.orderStatus !== 'cancelled')
-           .filter(o => kdsStatusFilter === 'all' ? o.orderStatus !== 'completed' : o.orderStatus === kdsStatusFilter)
-           .filter(o => {
-             if (!kdsSearchTerm.trim()) return true;
-             const term = kdsSearchTerm.toLowerCase();
-             const tableStr = String(o.tableId?.tableNo || o.tableId?.tableNumber || o.orderType || '').toLowerCase();
-             const kotStr = String(o.kotNumber || '').toLowerCase();
-             const waiterStr = String(o.waiterName || '').toLowerCase();
-             const itemsMatch = (o.items || []).some(it => (it.name || '').toLowerCase().includes(term));
-             return tableStr.includes(term) || kotStr.includes(term) || waiterStr.includes(term) || itemsMatch;
-           })
-           .map((ord) => {
-             const elapsedMin = ord.createdAt ? Math.max(0, Math.floor((Date.now() - new Date(ord.createdAt).getTime()) / 60000)) : 0;
-             const kitchenOrderMeta = kitchenMeta[ord._id] || {};
-             const itemStates = kitchenOrderMeta.itemStates || {};
-             const orderPriority = kitchenOrderMeta.priority || ord.priority || 'Normal';
-             const assignedChef = kitchenOrderMeta.chef || chefRoster[0];
-             const isDelayed = elapsedMin > 20 || (kitchenOrderMeta.delayAlert && elapsedMin > 15);
-             const isModerate = elapsedMin > 10;
-             const isVip = orderPriority === 'VIP' || orderPriority === 'Urgent';
-             const timeColor = isDelayed ? '#ef4444' : isModerate ? '#fc4f1a' : '#0d9f5f';
-             const startedAt = kitchenOrderMeta.startedAt || ord.createdAt;
-             const readyAt = kitchenOrderMeta.readyAt || null;
-
-             return (
-               <div
-                 key={ord._id}
+             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+               {/* 86 Stock-Out Button */}
+               <button
+                 onClick={() => setShow86Modal(true)}
                  style={{
-                   backgroundColor: '#ffffff',
-                   borderRadius: '10px',
-                   border: isVip ? '2px solid #e53935' : `2px solid ${timeColor}`,
-                   boxShadow: isVip ? '0 4px 12px rgba(229, 57, 53, 0.2)' : '0 2px 8px rgba(0,0,0,0.06)',
-                   overflow: 'hidden',
+                   padding: '8px 14px',
+                   backgroundColor: '#dc2626',
+                   color: '#fff',
+                   border: 'none',
+                   borderRadius: '6px',
+                   fontWeight: 'bold',
+                   cursor: 'pointer',
+                   fontSize: '12px',
                    display: 'flex',
-                   flexDirection: 'column',
-                   justifyContent: 'space-between'
+                   alignItems: 'center',
+                   gap: '6px',
+                   boxShadow: '0 2px 6px rgba(220, 38, 38, 0.25)'
                  }}
                >
-                 <div
-                   onClick={() => setKdsHistoryOrder(ord)}
-                   title="Click to view status history"
-                   style={{ padding: '10px 14px', backgroundColor: isVip ? '#ffebee' : isDelayed ? '#fef2f2' : '#f8fafc', borderBottom: '1px solid #e2e8f0', cursor: 'pointer' }}
+                 🚫 86 / Stock Out
+               </button>
+
+               {/* Sound Toggle */}
+               <button
+                 onClick={() => setKdsSoundEnabled(!kdsSoundEnabled)}
+                 style={{
+                   padding: '8px 12px',
+                   backgroundColor: kdsSoundEnabled ? '#059669' : '#64748b',
+                   color: '#fff',
+                   border: 'none',
+                   borderRadius: '6px',
+                   fontWeight: 'bold',
+                   cursor: 'pointer',
+                   fontSize: '12px',
+                   display: 'flex',
+                   alignItems: 'center',
+                   gap: '4px'
+                 }}
+                 title={kdsSoundEnabled ? 'Kitchen Bell ON' : 'Kitchen Bell Muted'}
+               >
+                 {kdsSoundEnabled ? '🔔 Bell ON' : '🔕 Muted'}
+               </button>
+
+               {/* Recall Completed Orders */}
+               <button
+                 onClick={() => setShowRecallModal(true)}
+                 style={{
+                   padding: '8px 12px',
+                   backgroundColor: '#fff',
+                   color: '#475569',
+                   border: '1px solid #cbd5e1',
+                   borderRadius: '6px',
+                   fontWeight: 'bold',
+                   cursor: 'pointer',
+                   fontSize: '12px'
+                 }}
+               >
+                 ↩️ Recall ({orders.filter(o => o.orderStatus === 'completed').length})
+               </button>
+
+               {/* Refresh */}
+               <button
+                 onClick={loadInitialData}
+                 style={{
+                   padding: '8px 14px',
+                   backgroundColor: '#fc4f1a',
+                   color: '#fff',
+                   border: 'none',
+                   borderRadius: '6px',
+                   fontWeight: 'bold',
+                   cursor: 'pointer',
+                   fontSize: '12px'
+                 }}
+               >
+                 🔄 Refresh
+               </button>
+             </div>
+           </div>
+
+           {/* ---- Station Routing Tabs (All / Kitchen / Tandoor / Bar / Dessert) ---- */}
+           <div style={{ display: 'flex', gap: '8px', marginBottom: '10px', flexWrap: 'wrap', alignItems: 'center' }}>
+             <span style={{ fontSize: '12px', fontWeight: 'bold', color: '#475569', marginRight: '4px' }}>Station:</span>
+             {[
+               { id: 'all', label: '🍽️ All Stations' },
+               { id: 'kitchen', label: '🥘 Kitchen' },
+               { id: 'tandoor', label: '🔥 Tandoor' },
+               { id: 'bar', label: '🍹 Bar & Drinks' },
+               { id: 'dessert', label: '🍨 Dessert' }
+             ].map((st) => {
+               const activeOrders = orders.filter(o => o.orderStatus !== 'cancelled' && o.orderStatus !== 'completed');
+               const count = st.id === 'all'
+                 ? activeOrders.length
+                 : activeOrders.filter(o => (o.items || []).some(it => getItemStation(it) === st.id)).length;
+               const isStationActive = kdsStationFilter === st.id;
+
+               return (
+                 <button
+                   key={st.id}
+                   onClick={() => setKdsStationFilter(st.id)}
+                   style={{
+                     padding: '6px 12px',
+                     borderRadius: '16px',
+                     border: isStationActive ? '2px solid #2563eb' : '1px solid #cbd5e1',
+                     backgroundColor: isStationActive ? '#eff6ff' : '#ffffff',
+                     color: isStationActive ? '#2563eb' : '#475569',
+                     fontWeight: 'bold',
+                     fontSize: '11px',
+                     cursor: 'pointer',
+                     display: 'flex',
+                     alignItems: 'center',
+                     gap: '6px'
+                   }}
                  >
-                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}>
-                     <div>
-                       <span style={{ fontWeight: 'bold', fontSize: '14px', color: '#0f172a' }}>
-                         {ord.tableId ? `Table ${ord.tableId.tableNo || ord.tableId.tableNumber}` : ord.orderType}
-                       </span>
-                       <span style={{ fontSize: '11px', color: '#64748b', marginLeft: '6px' }}>
-                         (KOT #{ord.kotNumber || 1})
-                       </span>
-                       {isVip && (
-                         <span style={{ backgroundColor: '#c62828', color: '#fff', fontSize: '9px', padding: '1px 5px', borderRadius: '3px', marginLeft: '6px', fontWeight: 'bold' }}>
-                           🔥 {orderPriority}
-                         </span>
-                       )}
-                     </div>
-                     <span style={{ fontSize: '11px', fontWeight: 'bold', color: timeColor }}>
-                       ⏱️ {elapsedMin} min
-                     </span>
-                   </div>
+                   <span>{st.label}</span>
+                   <span style={{
+                     backgroundColor: isStationActive ? '#2563eb' : '#e2e8f0',
+                     color: isStationActive ? '#fff' : '#475569',
+                     borderRadius: '10px',
+                     padding: '1px 6px',
+                     fontSize: '10px'
+                   }}>
+                     {count}
+                   </span>
+                 </button>
+               );
+             })}
+           </div>
 
-                   <div style={{ marginTop: '8px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '6px' }}>
-                     <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
-                       <span style={{ backgroundColor: '#e0f2fe', color: '#0369a1', borderRadius: '999px', padding: '3px 8px', fontSize: '10px', fontWeight: 'bold' }}>
-                         👨‍🍳 {assignedChef}
-                       </span>
-                       <span style={{ backgroundColor: '#ecfdf5', color: '#047857', borderRadius: '999px', padding: '3px 8px', fontSize: '10px', fontWeight: 'bold' }}>
-                         Started: {startedAt ? new Date(startedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—'}
-                       </span>
-                       {readyAt && (
-                         <span style={{ backgroundColor: '#dcfce7', color: '#166534', borderRadius: '999px', padding: '3px 8px', fontSize: '10px', fontWeight: 'bold' }}>
-                           Ready: {new Date(readyAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                         </span>
-                       )}
-                     </div>
-                     <select
-                       value={orderPriority}
-                       onClick={(e) => e.stopPropagation()}
-                       onChange={(e) => setKitchenPriority(ord._id, e.target.value)}
-                       style={{ border: '1px solid #cbd5e1', borderRadius: '6px', fontSize: '11px', padding: '4px 8px', background: '#fff' }}
+           {/* ---- Status Filter Tabs ---- */}
+           <div style={{ display: 'flex', gap: '8px', marginBottom: '12px', flexWrap: 'wrap' }}>
+             {['all', 'placed', 'preparing', 'ready', 'completed'].map((st) => {
+               const count = st === 'all'
+                 ? orders.filter(o => o.orderStatus !== 'cancelled').length
+                 : orders.filter(o => o.orderStatus === st).length;
+               const isActive = kdsStatusFilter === st;
+               const labelMap = { all: '🔥 Active', placed: '🆕 Placed', preparing: '🍳 Preparing', ready: '✅ Ready', completed: '💳 Completed' };
+               return (
+                 <button
+                   key={st}
+                   onClick={() => setKdsStatusFilter(st)}
+                   style={{
+                     padding: '8px 14px',
+                     borderRadius: '20px',
+                     border: isActive ? '2px solid #fc4f1a' : '1px solid #e2e8f0',
+                     backgroundColor: isActive ? '#fff7ed' : '#ffffff',
+                     color: isActive ? '#fc4f1a' : '#475569',
+                     fontWeight: 'bold',
+                     fontSize: '12px',
+                     cursor: 'pointer',
+                     display: 'flex',
+                     alignItems: 'center',
+                     gap: '6px'
+                   }}
+                 >
+                   {labelMap[st]}
+                   <span style={{
+                     backgroundColor: isActive ? '#fc4f1a' : '#e2e8f0',
+                     color: isActive ? '#fff' : '#475569',
+                     borderRadius: '10px',
+                     padding: '1px 7px',
+                     fontSize: '11px'
+                   }}>
+                     {count}
+                   </span>
+                 </button>
+               );
+             })}
+           </div>
+
+           {/* ---- Search Bar ---- */}
+           <div style={{ marginBottom: '16px' }}>
+             <input
+               type="text"
+               value={kdsSearchTerm}
+               onChange={(e) => setKdsSearchTerm(e.target.value)}
+               placeholder="🔍 Search by table no, item name, KOT number, waiter..."
+               style={{
+                 width: '100%',
+                 padding: '10px 14px',
+                 borderRadius: '8px',
+                 border: '1px solid #e2e8f0',
+                 fontSize: '13px',
+                 outline: 'none',
+                 boxSizing: 'border-box'
+               }}
+             />
+           </div>
+
+           {/* Kitchen Tickets Grid */}
+           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: '14px' }}>
+             {orders
+               .filter(o => o.orderStatus !== 'cancelled')
+               .filter(o => kdsStatusFilter === 'all' ? o.orderStatus !== 'completed' : o.orderStatus === kdsStatusFilter)
+               .filter(o => {
+                 if (kdsStationFilter === 'all') return true;
+                 return (o.items || []).some(it => getItemStation(it) === kdsStationFilter);
+               })
+               .filter(o => {
+                 if (!kdsSearchTerm.trim()) return true;
+                 const term = kdsSearchTerm.toLowerCase();
+                 const tableStr = String(o.tableId?.tableNo || o.tableId?.tableNumber || o.orderType || '').toLowerCase();
+                 const kotStr = String(o.kotNumber || '').toLowerCase();
+                 const waiterStr = String(o.waiterName || '').toLowerCase();
+                 const itemsMatch = (o.items || []).some(it => (it.name || '').toLowerCase().includes(term));
+                 return tableStr.includes(term) || kotStr.includes(term) || waiterStr.includes(term) || itemsMatch;
+               })
+               .map((ord) => {
+                 const elapsedMin = ord.createdAt ? Math.max(0, Math.floor((Date.now() - new Date(ord.createdAt).getTime()) / 60000)) : 0;
+                 const kitchenOrderMeta = kitchenMeta[ord._id] || {};
+                 const itemStates = kitchenOrderMeta.itemStates || {};
+                 const orderPriority = kitchenOrderMeta.priority || ord.priority || 'Normal';
+                 const assignedChef = kitchenOrderMeta.chef || chefRoster[0];
+                 const isDelayed = elapsedMin > 20 || (kitchenOrderMeta.delayAlert && elapsedMin > 15);
+                 const isModerate = elapsedMin > 10;
+                 const isVip = orderPriority === 'VIP' || orderPriority === 'Urgent';
+                 const timeColor = isDelayed ? '#ef4444' : isModerate ? '#fc4f1a' : '#0d9f5f';
+                 const startedAt = kitchenOrderMeta.startedAt || ord.createdAt;
+                 const readyAt = kitchenOrderMeta.readyAt || null;
+                 const tableLabel = formatKotTable(ord.tableId?.tableNo || ord.tableId?.tableNumber, ord.orderType);
+
+                 return (
+                   <div
+                     key={ord._id}
+                     style={{
+                       backgroundColor: '#ffffff',
+                       borderRadius: '10px',
+                       border: isVip ? '2px solid #e53935' : `2px solid ${timeColor}`,
+                       boxShadow: isVip ? '0 4px 12px rgba(229, 57, 53, 0.2)' : isDelayed ? '0 4px 12px rgba(239, 68, 68, 0.2)' : '0 2px 8px rgba(0,0,0,0.06)',
+                       overflow: 'hidden',
+                       display: 'flex',
+                       flexDirection: 'column',
+                       justifyContent: 'space-between'
+                     }}
+                   >
+                     <div
+                       onClick={() => setKdsHistoryOrder(ord)}
+                       title="Click to view status history"
+                       style={{ padding: '10px 14px', backgroundColor: isVip ? '#ffebee' : isDelayed ? '#fef2f2' : '#f8fafc', borderBottom: '1px solid #e2e8f0', cursor: 'pointer' }}
                      >
-                       <option value="Normal">Normal</option>
-                       <option value="Priority">Priority</option>
-                       <option value="Urgent">Urgent</option>
-                       <option value="VIP">VIP</option>
-                     </select>
-                   </div>
+                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}>
+                         <div>
+                           <span style={{ fontWeight: 'bold', fontSize: '14px', color: '#0f172a' }}>
+                             {tableLabel}
+                           </span>
+                           <span style={{ fontSize: '11px', color: '#64748b', marginLeft: '6px' }}>
+                             (KOT #{ord.kotNumber || 1})
+                           </span>
+                           {isVip && (
+                             <span style={{ backgroundColor: '#c62828', color: '#fff', fontSize: '9px', padding: '1px 5px', borderRadius: '3px', marginLeft: '6px', fontWeight: 'bold' }}>
+                               🔥 {orderPriority}
+                             </span>
+                           )}
+                         </div>
+                         <span style={{ fontSize: '11px', fontWeight: 'bold', color: timeColor }}>
+                           ⏱️ {elapsedMin} min
+                         </span>
+                       </div>
 
-                   {(isDelayed || kitchenOrderMeta.delayAlert) && (
-                     <div style={{ marginTop: '8px', backgroundColor: '#fee2e2', color: '#b91c1c', border: '1px solid #fecaca', padding: '6px 8px', borderRadius: '6px', fontSize: '11px', fontWeight: 'bold' }}>
-                       ⚠️ Delay alert: Kitchen order is running beyond expected timing.
+                       <div style={{ fontSize: '11px', color: '#64748b', marginTop: '3px' }}>
+                         👨‍🍳 {ord.waiterName || 'Staff'} {ord.customerName ? `· 👤 ${ord.customerName}` : ''}
+                       </div>
+
+                       {ord.celebrationOccasion && (
+                         <div style={{ fontSize: '11px', color: '#db2777', fontWeight: 'bold', marginTop: '2px' }}>
+                           🎉 {ord.celebrationOccasion}
+                         </div>
+                       )}
+
+                       <div style={{ marginTop: '8px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '6px' }}>
+                         <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                           <span style={{ backgroundColor: '#e0f2fe', color: '#0369a1', borderRadius: '999px', padding: '3px 8px', fontSize: '10px', fontWeight: 'bold' }}>
+                             👨‍🍳 {assignedChef}
+                           </span>
+                           <span style={{ backgroundColor: '#ecfdf5', color: '#047857', borderRadius: '999px', padding: '3px 8px', fontSize: '10px', fontWeight: 'bold' }}>
+                             Started: {startedAt ? new Date(startedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—'}
+                           </span>
+                           {readyAt && (
+                             <span style={{ backgroundColor: '#dcfce7', color: '#166534', borderRadius: '999px', padding: '3px 8px', fontSize: '10px', fontWeight: 'bold' }}>
+                               Ready: {new Date(readyAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                             </span>
+                           )}
+                         </div>
+                         <select
+                           value={orderPriority}
+                           onClick={(e) => e.stopPropagation()}
+                           onChange={(e) => setKitchenPriority(ord._id, e.target.value)}
+                           style={{ border: '1px solid #cbd5e1', borderRadius: '6px', fontSize: '11px', padding: '4px 8px', background: '#fff' }}
+                         >
+                           <option value="Normal">Normal</option>
+                           <option value="Priority">Priority</option>
+                           <option value="Urgent">Urgent</option>
+                           <option value="VIP">VIP</option>
+                         </select>
+                       </div>
+
+                       {(isDelayed || kitchenOrderMeta.delayAlert) && (
+                         <div style={{ marginTop: '8px', backgroundColor: '#fee2e2', color: '#b91c1c', border: '1px solid #fecaca', padding: '6px 8px', borderRadius: '6px', fontSize: '11px', fontWeight: 'bold' }}>
+                           ⚠️ Delay alert: Kitchen order is running beyond expected timing.
+                         </div>
+                       )}
+                     </div>
+
+                     <div style={{ padding: '12px 14px', flex: 1 }}>
+                       <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                         {(ord.items || []).map((it, idx) => {
+                           const state = itemStates[String(it.itemId || `${it.name}-${idx}`)] || {};
+                           const itemStatus = state.status || 'queued';
+                           const itemChef = state.chef || assignedChef;
+                           const checkKey = `${ord._id}-${idx}`;
+                           const isChecked = !!kdsCheckedItems[checkKey];
+                           const itemStation = getItemStation(it);
+
+                           return (
+                             <div key={idx} style={{ borderBottom: '1px dashed #e2e8f0', paddingBottom: '6px' }}>
+                               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                 <div
+                                   onClick={() => setKdsCheckedItems(prev => ({ ...prev, [checkKey]: !prev[checkKey] }))}
+                                   style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer' }}
+                                   title="Click to strike-through prepared item"
+                                 >
+                                   <span style={{ fontSize: '13px' }}>{isChecked ? '☑️' : '◻️'}</span>
+                                   <VegNonVegBadge type={it.foodType || 'veg'} size={12} />
+                                   <span style={{
+                                     fontSize: '13px',
+                                     fontWeight: 'bold',
+                                     color: isChecked ? '#94a3b8' : '#0f172a',
+                                     textDecoration: isChecked ? 'line-through' : 'none'
+                                   }}>
+                                     {it.name} {it.portion === 'Half' ? '(H)' : ''}
+                                   </span>
+                                   {itemStation !== 'kitchen' && (
+                                     <span style={{ fontSize: '9px', padding: '1px 5px', borderRadius: '4px', background: '#f1f5f9', color: '#475569', fontWeight: 'bold', textTransform: 'capitalize' }}>
+                                       {itemStation}
+                                     </span>
+                                   )}
+                                 </div>
+                                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                   <button
+                                     onClick={() => setSelectedRecipe({ name: it.name, itemId: it.itemId })}
+                                     title="View Recipe / Ingredients"
+                                     style={{ background: '#e0f2fe', color: '#0369a1', border: 'none', padding: '2px 6px', borderRadius: '4px', fontSize: '10px', cursor: 'pointer', fontWeight: 'bold' }}
+                                   >
+                                     📖 Recipe
+                                   </button>
+                                   <span style={{ fontSize: '14px', fontWeight: 'bold', color: '#2563eb' }}>
+                                     x{it.quantity}
+                                   </span>
+                                 </div>
+                               </div>
+                               {it.notes && (
+                                 <div style={{ fontSize: '11px', color: '#b91c1c', fontStyle: 'italic', marginTop: '2px' }}>
+                                   👉 Note: {it.notes}
+                                 </div>
+                               )}
+                               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '5px', gap: '6px', flexWrap: 'wrap' }}>
+                                 <span style={{ backgroundColor: itemStatus === 'ready' ? '#dcfce7' : itemStatus === 'preparing' ? '#fef3c7' : '#e2e8f0', color: itemStatus === 'ready' ? '#166534' : itemStatus === 'preparing' ? '#92400e' : '#475569', borderRadius: '999px', padding: '2px 7px', fontSize: '10px', fontWeight: 'bold', textTransform: 'capitalize' }}>
+                                   {itemStatus}
+                                 </span>
+                                 <span style={{ fontSize: '10px', color: '#64748b' }}>
+                                   Chef: {itemChef}
+                                 </span>
+                               </div>
+                               <div style={{ display: 'flex', gap: '5px', marginTop: '6px' }}>
+                                 <button
+                                   onClick={() => handleItemLevelStatusUpdate && handleItemLevelStatusUpdate(ord._id, ord.kotNumber, it.itemId || `${it.name}-${idx}`, 'preparing', assignedChef)}
+                                   style={{ background: '#ffb74d', color: '#fff', border: 'none', padding: '2px 6px', fontSize: '10px', borderRadius: '3px', cursor: 'pointer', fontWeight: 'bold' }}
+                                 >
+                                   🍳 Prep Item
+                                 </button>
+                                 <button
+                                   onClick={() => handleItemLevelStatusUpdate && handleItemLevelStatusUpdate(ord._id, ord.kotNumber, it.itemId || `${it.name}-${idx}`, 'ready', assignedChef)}
+                                   style={{ background: '#66bb6a', color: '#fff', border: 'none', padding: '2px 6px', fontSize: '10px', borderRadius: '3px', cursor: 'pointer', fontWeight: 'bold' }}
+                                 >
+                                   ✅ Ready Item
+                                 </button>
+                                 <select
+                                   onClick={(e) => e.stopPropagation()}
+                                   onChange={(e) => handleItemLevelStatusUpdate && handleItemLevelStatusUpdate(ord._id, ord.kotNumber, it.itemId || `${it.name}-${idx}`, e.target.value, assignedChef)}
+                                   value={itemStatus}
+                                   style={{ border: '1px solid #cbd5e1', borderRadius: '3px', fontSize: '10px', padding: '2px 5px', background: '#fff' }}
+                                 >
+                                   <option value="queued">Queued</option>
+                                   <option value="preparing">Preparing</option>
+                                   <option value="ready">Ready</option>
+                                 </select>
+                               </div>
+                             </div>
+                           );
+                         })}
+                       </div>
+                     </div>
+
+                     <div style={{ padding: '10px 14px', backgroundColor: '#f8fafc', borderTop: '1px solid #e2e8f0', display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                       {ord.orderStatus === 'placed' && (
+                         <button
+                           onClick={() => handleKitchenStatusUpdate(ord, 'preparing')}
+                           style={{ flex: 1, padding: '8px', backgroundColor: '#fc4f1a', color: '#fff', border: 'none', borderRadius: '6px', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer' }}
+                         >
+                           🍳 Start Cooking
+                         </button>
+                       )}
+                       {(ord.orderStatus === 'placed' || ord.orderStatus === 'preparing') && (
+                         <button
+                           onClick={() => handleKitchenStatusUpdate(ord, 'ready')}
+                           style={{ flex: 1, padding: '8px', backgroundColor: '#0d9f5f', color: '#fff', border: 'none', borderRadius: '6px', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer' }}
+                         >
+                           ✅ Ready to Serve
+                         </button>
+                       )}
+                       {ord.orderStatus === 'ready' && (
+                         <button
+                           onClick={() => handleKitchenStatusUpdate(ord, 'completed')}
+                           style={{ flex: 1, padding: '8px', backgroundColor: '#3b82f6', color: '#fff', border: 'none', borderRadius: '6px', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer' }}
+                         >
+                           💳 Settle Bill
+                         </button>
+                       )}
+                       <button
+                         onClick={() => expediteOrder(ord._id)}
+                         style={{ padding: '8px 10px', backgroundColor: '#fef2f2', color: '#b91c1c', border: '1px solid #fecaca', borderRadius: '6px', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer' }}
+                       >
+                         🚨 Expedite
+                       </button>
+                       <button
+                         onClick={() => setKdsHistoryOrder(ord)}
+                         title="View Status History"
+                         style={{ padding: '8px 10px', backgroundColor: '#f1f5f9', color: '#0f172a', border: 'none', borderRadius: '6px', fontSize: '11px', cursor: 'pointer' }}
+                       >
+                         🕘
+                       </button>
+                       <button
+                         onClick={() => {
+                           setKotPrintData({
+                             kotNumber: ord.kotNumber || 1,
+                             tableNo: ord.tableId?.tableNo || ord.tableId?.tableNumber || ord.orderType,
+                             waiterName: ord.waiterName || 'Staff',
+                             orderType: ord.orderType || 'Dine-In',
+                             items: ord.items || [],
+                             createdAt: ord.createdAt
+                           });
+                           setPrintType('kot');
+                           setTimeout(() => window.print(), 100);
+                         }}
+                         title="Reprint KOT Slip"
+                         style={{ padding: '8px 10px', backgroundColor: '#e2e8f0', color: '#0f172a', border: 'none', borderRadius: '6px', fontSize: '11px', cursor: 'pointer' }}
+                       >
+                         🖨️
+                       </button>
+                     </div>
+                   </div>
+                 );
+               })}
+           </div>
+
+           {/* ---- Recipe Quick View Modal ---- */}
+           {selectedRecipe && (
+             <div
+               onClick={() => setSelectedRecipe(null)}
+               style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100 }}
+             >
+               <div
+                 onClick={(e) => e.stopPropagation()}
+                 style={{ backgroundColor: '#fff', borderRadius: '12px', width: '380px', maxWidth: '90%', padding: '20px', boxShadow: '0 10px 30px rgba(0,0,0,0.2)' }}
+               >
+                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
+                   <h3 style={{ margin: 0, fontSize: '16px', color: '#0f172a' }}>📖 Recipe: {selectedRecipe.name}</h3>
+                   <button onClick={() => setSelectedRecipe(null)} style={{ border: 'none', background: 'none', fontSize: '18px', cursor: 'pointer', color: '#64748b' }}>✕</button>
+                 </div>
+                 <p style={{ fontSize: '13px', color: '#475569', background: '#f8fafc', padding: '10px', borderRadius: '6px' }}>
+                   The recipe and ingredient breakdown for this item will appear here for quick kitchen reference.
+                 </p>
+                 <button
+                   onClick={() => setSelectedRecipe(null)}
+                   style={{ width: '100%', marginTop: '10px', padding: '8px', backgroundColor: '#0f172a', color: '#fff', border: 'none', borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer' }}
+                 >
+                   Close
+                 </button>
+               </div>
+             </div>
+           )}
+
+           {/* ---- Order Status History Modal ---- */}
+           {kdsHistoryOrder && (
+             <div
+               onClick={() => setKdsHistoryOrder(null)}
+               style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}
+             >
+               <div
+                 onClick={(e) => e.stopPropagation()}
+                 style={{ backgroundColor: '#fff', borderRadius: '12px', width: '360px', maxWidth: '90%', maxHeight: '80vh', overflowY: 'auto', boxShadow: '0 10px 30px rgba(0,0,0,0.2)' }}
+               >
+                 <div style={{ padding: '14px 18px', borderBottom: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                   <h3 style={{ margin: 0, fontSize: '15px', color: '#0f172a' }}>
+                     🕘 Order History — {kdsHistoryOrder.tableId ? `Table ${kdsHistoryOrder.tableId.tableNo || kdsHistoryOrder.tableId.tableNumber}` : kdsHistoryOrder.orderType} (KOT #{kdsHistoryOrder.kotNumber || 1})
+                   </h3>
+                   <button onClick={() => setKdsHistoryOrder(null)} style={{ border: 'none', background: 'none', fontSize: '18px', cursor: 'pointer', color: '#64748b' }}>✕</button>
+                 </div>
+                 <div style={{ padding: '14px 18px' }}>
+                   {(kdsHistoryOrder.statusHistory && kdsHistoryOrder.statusHistory.length > 0) ? (
+                     <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                       {kdsHistoryOrder.statusHistory.map((h, idx) => (
+                         <div key={idx} style={{ display: 'flex', gap: '10px', alignItems: 'flex-start' }}>
+                           <div style={{ width: '10px', height: '10px', borderRadius: '50%', backgroundColor: '#fc4f1a', marginTop: '5px', flexShrink: 0 }} />
+                           <div>
+                             <div style={{ fontSize: '13px', fontWeight: 'bold', color: '#0f172a', textTransform: 'capitalize' }}>{h.status}</div>
+                             <div style={{ fontSize: '11px', color: '#64748b' }}>
+                               {h.updatedBy ? `by ${h.updatedBy} · ` : ''}{h.timestamp ? new Date(h.timestamp).toLocaleString() : ''}
+                             </div>
+                           </div>
+                         </div>
+                       ))}
+                     </div>
+                   ) : (
+                     <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                       <div style={{ fontSize: '13px', color: '#0f172a' }}>
+                         🆕 Order Placed — {kdsHistoryOrder.createdAt ? new Date(kdsHistoryOrder.createdAt).toLocaleString() : 'N/A'}
+                       </div>
+                       <div style={{ fontSize: '13px', color: '#0f172a' }}>
+                         Current status: <b style={{ textTransform: 'capitalize' }}>{kdsHistoryOrder.orderStatus}</b>
+                       </div>
                      </div>
                    )}
                  </div>
+               </div>
+             </div>
+           )}
 
-                 <div style={{ padding: '12px 14px', flex: 1 }}>
-                   <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                     {(ord.items || []).map((it, idx) => {
-                       const state = itemStates[String(it.itemId || `${it.name}-${idx}`)] || {};
-                       const itemStatus = state.status || 'queued';
-                       const itemChef = state.chef || assignedChef;
+           {/* ---- 86 / Stock Out Management Modal ---- */}
+           {show86Modal && (
+             <div
+               onClick={() => setShow86Modal(false)}
+               style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1150 }}
+             >
+               <div
+                 onClick={(e) => e.stopPropagation()}
+                 style={{ backgroundColor: '#fff', borderRadius: '14px', width: '500px', maxWidth: '95%', maxHeight: '85vh', display: 'flex', flexDirection: 'column', boxShadow: '0 10px 30px rgba(0,0,0,0.25)', overflow: 'hidden' }}
+               >
+                 <div style={{ padding: '16px 20px', borderBottom: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#fef2f2' }}>
+                   <div>
+                     <h3 style={{ margin: 0, fontSize: '16px', color: '#991b1b', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                       🚫 86 / Out of Stock Management
+                     </h3>
+                     <div style={{ fontSize: '11px', color: '#b91c1c', marginTop: '2px' }}>
+                       Turn dishes OFF immediately when kitchen runs out of ingredients.
+                     </div>
+                   </div>
+                   <button onClick={() => setShow86Modal(false)} style={{ border: 'none', background: 'none', fontSize: '20px', cursor: 'pointer', color: '#64748b' }}>✕</button>
+                 </div>
 
+                 <div style={{ padding: '12px 20px', borderBottom: '1px solid #e2e8f0' }}>
+                   <input
+                     type="text"
+                     value={stockSearch}
+                     onChange={(e) => setStockSearch(e.target.value)}
+                     placeholder="🔍 Search dish or ingredient to 86..."
+                     style={{ width: '100%', padding: '8px 12px', borderRadius: '6px', border: '1px solid #cbd5e1', fontSize: '13px', outline: 'none', boxSizing: 'border-box' }}
+                   />
+                 </div>
+
+                 <div style={{ flex: 1, overflowY: 'auto', padding: '12px 20px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                   {menuItems
+                     .filter(m => !stockSearch.trim() || (m.name || '').toLowerCase().includes(stockSearch.toLowerCase()) || (m.category || '').toLowerCase().includes(stockSearch.toLowerCase()))
+                     .map((item) => {
+                       const isAvail = item.isAvailable !== false;
                        return (
-                         <div key={idx} style={{ borderBottom: '1px dashed #e2e8f0', paddingBottom: '6px' }}>
-                           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                             <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                               <VegNonVegBadge type={it.foodType || 'veg'} size={12} />
-                               <span style={{ fontSize: '13px', fontWeight: 'bold', color: '#0f172a' }}>
-                                 {it.name} {it.portion === 'Half' ? '(H)' : ''}
-                               </span>
+                         <div
+                           key={item._id || item.id}
+                           style={{
+                             display: 'flex',
+                             justifyContent: 'space-between',
+                             alignItems: 'center',
+                             padding: '10px 12px',
+                             borderRadius: '8px',
+                             border: isAvail ? '1px solid #e2e8f0' : '1px solid #fecaca',
+                             backgroundColor: isAvail ? '#ffffff' : '#fff5f5'
+                           }}
+                         >
+                           <div>
+                             <div style={{ fontWeight: 'bold', fontSize: '13px', color: isAvail ? '#0f172a' : '#991b1b' }}>
+                               {item.name}
                              </div>
-                             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                               <button
-                                 onClick={() => setSelectedRecipe({ name: it.name, itemId: it.itemId })}
-                                 title="View Recipe / Ingredients"
-                                 style={{ background: '#e0f2fe', color: '#0369a1', border: 'none', padding: '2px 6px', borderRadius: '4px', fontSize: '10px', cursor: 'pointer', fontWeight: 'bold' }}
-                               >
-                                 📖 Recipe
-                               </button>
-                               <span style={{ fontSize: '14px', fontWeight: 'bold', color: '#2563eb' }}>
-                                 x{it.quantity}
-                               </span>
+                             <div style={{ fontSize: '11px', color: '#64748b' }}>
+                               {item.category || 'General'} · ₹{item.price}
                              </div>
                            </div>
-                           {it.notes && (
-                             <div style={{ fontSize: '11px', color: '#b91c1c', fontStyle: 'italic', marginTop: '2px' }}>
-                               👉 Note: {it.notes}
-                             </div>
-                           )}
-                           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '5px', gap: '6px', flexWrap: 'wrap' }}>
-                             <span style={{ backgroundColor: itemStatus === 'ready' ? '#dcfce7' : itemStatus === 'preparing' ? '#fef3c7' : '#e2e8f0', color: itemStatus === 'ready' ? '#166534' : itemStatus === 'preparing' ? '#92400e' : '#475569', borderRadius: '999px', padding: '2px 7px', fontSize: '10px', fontWeight: 'bold', textTransform: 'capitalize' }}>
-                               {itemStatus}
-                             </span>
-                             <span style={{ fontSize: '10px', color: '#64748b' }}>
-                               Chef: {itemChef}
-                             </span>
-                           </div>
-                           <div style={{ display: 'flex', gap: '5px', marginTop: '6px' }}>
-                             <button
-                               onClick={() => handleItemLevelStatusUpdate && handleItemLevelStatusUpdate(ord._id, ord.kotNumber, it.itemId || `${it.name}-${idx}`, 'preparing', assignedChef)}
-                               style={{ background: '#ffb74d', color: '#fff', border: 'none', padding: '2px 6px', fontSize: '10px', borderRadius: '3px', cursor: 'pointer', fontWeight: 'bold' }}
-                             >
-                               🍳 Prep Item
-                             </button>
-                             <button
-                               onClick={() => handleItemLevelStatusUpdate && handleItemLevelStatusUpdate(ord._id, ord.kotNumber, it.itemId || `${it.name}-${idx}`, 'ready', assignedChef)}
-                               style={{ background: '#66bb6a', color: '#fff', border: 'none', padding: '2px 6px', fontSize: '10px', borderRadius: '3px', cursor: 'pointer', fontWeight: 'bold' }}
-                             >
-                               ✅ Ready Item
-                             </button>
-                             <select
-                               onClick={(e) => e.stopPropagation()}
-                               onChange={(e) => handleItemLevelStatusUpdate && handleItemLevelStatusUpdate(ord._id, ord.kotNumber, it.itemId || `${it.name}-${idx}`, e.target.value, assignedChef)}
-                               value={itemStatus}
-                               style={{ border: '1px solid #cbd5e1', borderRadius: '3px', fontSize: '10px', padding: '2px 5px', background: '#fff' }}
-                             >
-                               <option value="queued">Queued</option>
-                               <option value="preparing">Preparing</option>
-                               <option value="ready">Ready</option>
-                             </select>
-                           </div>
+
+                           <button
+                             onClick={() => handleToggleStock(item._id || item.id)}
+                             style={{
+                               padding: '6px 14px',
+                               borderRadius: '6px',
+                               border: 'none',
+                               fontSize: '11px',
+                               fontWeight: 'bold',
+                               cursor: 'pointer',
+                               backgroundColor: isAvail ? '#0d9f5f' : '#dc2626',
+                               color: '#fff'
+                             }}
+                           >
+                             {isAvail ? '✅ In Stock' : '🚫 86 (Out of Stock)'}
+                           </button>
                          </div>
                        );
                      })}
-                   </div>
                  </div>
 
-                 <div style={{ padding: '10px 14px', backgroundColor: '#f8fafc', borderTop: '1px solid #e2e8f0', display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
-                   {ord.orderStatus === 'placed' && (
-                     <button
-                       onClick={() => handleKitchenStatusUpdate(ord, 'preparing')}
-                       style={{ flex: 1, padding: '8px', backgroundColor: '#fc4f1a', color: '#fff', border: 'none', borderRadius: '6px', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer' }}
-                     >
-                       🍳 Start Cooking
-                     </button>
-                   )}
-                   {(ord.orderStatus === 'placed' || ord.orderStatus === 'preparing') && (
-                     <button
-                       onClick={() => handleKitchenStatusUpdate(ord, 'ready')}
-                       style={{ flex: 1, padding: '8px', backgroundColor: '#0d9f5f', color: '#fff', border: 'none', borderRadius: '6px', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer' }}
-                     >
-                       ✅ Ready to Serve
-                     </button>
-                   )}
-                   {ord.orderStatus === 'ready' && (
-                     <button
-                       onClick={() => handleKitchenStatusUpdate(ord, 'completed')}
-                       style={{ flex: 1, padding: '8px', backgroundColor: '#3b82f6', color: '#fff', border: 'none', borderRadius: '6px', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer' }}
-                     >
-                       💳 Settle Bill
-                     </button>
-                   )}
+                 <div style={{ padding: '12px 20px', borderTop: '1px solid #e2e8f0', display: 'flex', justifyContent: 'flex-end', backgroundColor: '#f8fafc' }}>
                    <button
-                     onClick={() => expediteOrder(ord._id)}
-                     style={{ padding: '8px 10px', backgroundColor: '#fef2f2', color: '#b91c1c', border: '1px solid #fecaca', borderRadius: '6px', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer' }}
+                     onClick={() => setShow86Modal(false)}
+                     style={{ padding: '8px 16px', backgroundColor: '#0f172a', color: '#fff', border: 'none', borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer', fontSize: '12px' }}
                    >
-                     🚨 Expedite
-                   </button>
-                   <button
-                     onClick={() => setKdsHistoryOrder(ord)}
-                     title="View Status History"
-                     style={{ padding: '8px 10px', backgroundColor: '#f1f5f9', color: '#0f172a', border: 'none', borderRadius: '6px', fontSize: '11px', cursor: 'pointer' }}
-                   >
-                     🕘
-                   </button>
-                   <button
-                     onClick={() => {
-                       setKotPrintData({
-                         kotNumber: ord.kotNumber || 1,
-                         tableNo: ord.tableId?.tableNo || ord.tableId?.tableNumber || ord.orderType,
-                         waiterName: ord.waiterName || 'Staff',
-                         orderType: ord.orderType || 'Dine-In',
-                         items: ord.items || [],
-                         createdAt: ord.createdAt
-                       });
-                       setPrintType('kot');
-                       setTimeout(() => window.print(), 100);
-                     }}
-                     title="Reprint KOT Slip"
-                     style={{ padding: '8px 10px', backgroundColor: '#e2e8f0', color: '#0f172a', border: 'none', borderRadius: '6px', fontSize: '11px', cursor: 'pointer' }}
-                   >
-                     🖨️
+                     Done
                    </button>
                  </div>
                </div>
-             );
-           })}
-       </div>
-
-       {/* ---- Recipe Quick View Modal ---- */}
-       {selectedRecipe && (
-         <div
-           onClick={() => setSelectedRecipe(null)}
-           style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100 }}
-         >
-           <div
-             onClick={(e) => e.stopPropagation()}
-             style={{ backgroundColor: '#fff', borderRadius: '12px', width: '380px', maxWidth: '90%', padding: '20px', boxShadow: '0 10px 30px rgba(0,0,0,0.2)' }}
-           >
-             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
-               <h3 style={{ margin: 0, fontSize: '16px', color: '#0f172a' }}>📖 Recipe: {selectedRecipe.name}</h3>
-               <button onClick={() => setSelectedRecipe(null)} style={{ border: 'none', background: 'none', fontSize: '18px', cursor: 'pointer', color: '#64748b' }}>✕</button>
              </div>
-             <p style={{ fontSize: '13px', color: '#475569', background: '#f8fafc', padding: '10px', borderRadius: '6px' }}>
-               The recipe and ingredient breakdown for this item will appear here for quick kitchen reference.
-             </p>
-             <button
-               onClick={() => setSelectedRecipe(null)}
-               style={{ width: '100%', marginTop: '10px', padding: '8px', backgroundColor: '#0f172a', color: '#fff', border: 'none', borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer' }}
+           )}
+
+           {/* ---- Recall Completed Orders Modal ---- */}
+           {showRecallModal && (
+             <div
+               onClick={() => setShowRecallModal(false)}
+               style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1150 }}
              >
-               Close
-             </button>
-           </div>
-         </div>
-       )}
-
-       {/* ---- Order Status History Modal ---- */}
-       {kdsHistoryOrder && (
-         <div
-           onClick={() => setKdsHistoryOrder(null)}
-           style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}
-         >
-           <div
-             onClick={(e) => e.stopPropagation()}
-             style={{ backgroundColor: '#fff', borderRadius: '12px', width: '360px', maxWidth: '90%', maxHeight: '80vh', overflowY: 'auto', boxShadow: '0 10px 30px rgba(0,0,0,0.2)' }}
-           >
-             <div style={{ padding: '14px 18px', borderBottom: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-               <h3 style={{ margin: 0, fontSize: '15px', color: '#0f172a' }}>
-                 🕘 Order History — {kdsHistoryOrder.tableId ? `Table ${kdsHistoryOrder.tableId.tableNo || kdsHistoryOrder.tableId.tableNumber}` : kdsHistoryOrder.orderType} (KOT #{kdsHistoryOrder.kotNumber || 1})
-               </h3>
-               <button onClick={() => setKdsHistoryOrder(null)} style={{ border: 'none', background: 'none', fontSize: '18px', cursor: 'pointer', color: '#64748b' }}>✕</button>
-             </div>
-             <div style={{ padding: '14px 18px' }}>
-               {(kdsHistoryOrder.statusHistory && kdsHistoryOrder.statusHistory.length > 0) ? (
-                 <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                   {kdsHistoryOrder.statusHistory.map((h, idx) => (
-                     <div key={idx} style={{ display: 'flex', gap: '10px', alignItems: 'flex-start' }}>
-                       <div style={{ width: '10px', height: '10px', borderRadius: '50%', backgroundColor: '#fc4f1a', marginTop: '5px', flexShrink: 0 }} />
-                       <div>
-                         <div style={{ fontSize: '13px', fontWeight: 'bold', color: '#0f172a', textTransform: 'capitalize' }}>{h.status}</div>
-                         <div style={{ fontSize: '11px', color: '#64748b' }}>
-                           {h.updatedBy ? `by ${h.updatedBy} · ` : ''}{h.timestamp ? new Date(h.timestamp).toLocaleString() : ''}
-                         </div>
-                       </div>
+               <div
+                 onClick={(e) => e.stopPropagation()}
+                 style={{ backgroundColor: '#fff', borderRadius: '14px', width: '600px', maxWidth: '95%', maxHeight: '85vh', display: 'flex', flexDirection: 'column', boxShadow: '0 10px 30px rgba(0,0,0,0.25)', overflow: 'hidden' }}
+               >
+                 <div style={{ padding: '16px 20px', borderBottom: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#f0fdf4' }}>
+                   <div>
+                     <h3 style={{ margin: 0, fontSize: '16px', color: '#166534', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                       ↩️ Recalled / Completed Kitchen Orders
+                     </h3>
+                     <div style={{ fontSize: '11px', color: '#15803d', marginTop: '2px' }}>
+                       View recently settled tickets or un-bump them back to the kitchen.
                      </div>
-                   ))}
-                 </div>
-               ) : (
-                 <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                   <div style={{ fontSize: '13px', color: '#0f172a' }}>
-                     🆕 Order Placed — {kdsHistoryOrder.createdAt ? new Date(kdsHistoryOrder.createdAt).toLocaleString() : 'N/A'}
                    </div>
-                   <div style={{ fontSize: '13px', color: '#0f172a' }}>
-                     Current status: <b style={{ textTransform: 'capitalize' }}>{kdsHistoryOrder.orderStatus}</b>
-                   </div>
+                   <button onClick={() => setShowRecallModal(false)} style={{ border: 'none', background: 'none', fontSize: '20px', cursor: 'pointer', color: '#64748b' }}>✕</button>
                  </div>
-               )}
+
+                 <div style={{ flex: 1, overflowY: 'auto', padding: '14px 20px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                   {orders.filter(o => o.orderStatus === 'completed').length === 0 ? (
+                     <div style={{ textAlign: 'center', padding: '40px 20px', color: '#64748b', fontSize: '13px' }}>
+                       No completed orders to recall.
+                     </div>
+                   ) : (
+                     orders
+                       .filter(o => o.orderStatus === 'completed')
+                       .slice(-20)
+                       .reverse()
+                       .map(ord => (
+                         <div
+                           key={ord._id}
+                           style={{ border: '1px solid #e2e8f0', borderRadius: '8px', padding: '10px 14px', backgroundColor: '#f8fafc', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}
+                         >
+                           <div>
+                             <div style={{ fontWeight: 'bold', fontSize: '13px', color: '#0f172a' }}>
+                               {formatKotTable(ord.tableId?.tableNo || ord.tableId?.tableNumber, ord.orderType)} (KOT #{ord.kotNumber || 1})
+                             </div>
+                             <div style={{ fontSize: '11px', color: '#64748b', marginTop: '2px' }}>
+                               {(ord.items || []).map(i => `${i.name} ×${i.quantity}`).join(', ')}
+                             </div>
+                             <div style={{ fontSize: '10px', color: '#94a3b8', marginTop: '2px' }}>
+                               Completed: {ord.updatedAt ? new Date(ord.updatedAt).toLocaleTimeString() : 'Recently'}
+                             </div>
+                           </div>
+
+                           <button
+                             onClick={async () => {
+                               try {
+                                 await api.put(`/orders/status/${ord._id}`, { status: 'ready' });
+                                 loadInitialData();
+                                 alert('Order restored to Ready status in kitchen.');
+                               } catch (e) {
+                                 alert('Failed to restore order');
+                               }
+                             }}
+                             style={{ padding: '6px 12px', backgroundColor: '#2563eb', color: '#fff', border: 'none', borderRadius: '6px', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer' }}
+                           >
+                             ↩️ Un-Bump
+                           </button>
+                         </div>
+                       ))
+                   )}
+                 </div>
+
+                 <div style={{ padding: '12px 20px', borderTop: '1px solid #e2e8f0', display: 'flex', justifyContent: 'flex-end', backgroundColor: '#f8fafc' }}>
+                   <button
+                     onClick={() => setShowRecallModal(false)}
+                     style={{ padding: '8px 16px', backgroundColor: '#0f172a', color: '#fff', border: 'none', borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer', fontSize: '12px' }}
+                   >
+                     Close
+                   </button>
+                 </div>
+               </div>
              </div>
-           </div>
+           )}
          </div>
        )}
-     </div>
-   )}
-          {/* ================================================================= */}
-          {/* TAB 4: ONLINE ORDERS (ZOMATO / SWIGGY)                            */}
-          {/* ================================================================= */}
-          {activeTab === 'online' && (
-            <div style={{ padding: '25px', flex: 1, overflowY: 'auto', backgroundColor: '#f8fafc' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', gap: '12px', flexWrap: 'wrap' }}>
-                <div>
-                  <h2 style={{ margin: 0, fontSize: '20px', color: '#0f172a' }}>🛵 Online Orders Integration</h2>
-                  <p style={{ margin: '4px 0 0 0', fontSize: '13px', color: '#64748b' }}>Zomato, Swiggy, webhooks, partner assignment & commission tracking.</p>
-                </div>
-                <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-                  <button onClick={exportOnlineOrdersCsv} style={{ padding: '8px 12px', borderRadius: '8px', border: '1px solid #cbd5e1', background: '#fff', color: '#0f172a', fontWeight: 700, cursor: 'pointer' }}>Export CSV</button>
-                </div>
-              </div>
 
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: '14px', marginBottom: '18px' }}>
-                <div style={{ background: '#fff', borderRadius: '12px', padding: '18px', border: '1px solid #e2e8f0' }}>
-                  <div style={{ color: '#64748b', fontSize: '11px', fontWeight: 700, textTransform: 'uppercase' }}>Pending</div>
-                  <div style={{ fontSize: '28px', fontWeight: 800, color: '#0f172a', marginTop: '8px' }}>{onlineOrders.filter(o => o.status === 'Pending').length}</div>
-                </div>
-                <div style={{ background: '#fff', borderRadius: '12px', padding: '18px', border: '1px solid #e2e8f0' }}>
-                  <div style={{ color: '#64748b', fontSize: '11px', fontWeight: 700, textTransform: 'uppercase' }}>Accepted</div>
-                  <div style={{ fontSize: '28px', fontWeight: 800, color: '#0f172a', marginTop: '8px' }}>{onlineOrders.filter(o => o.status === 'Accepted' || o.status === 'Preparing' || o.status === 'Ready for Pickup').length}</div>
-                </div>
-                <div style={{ background: '#fff', borderRadius: '12px', padding: '18px', border: '1px solid #e2e8f0' }}>
-                  <div style={{ color: '#64748b', fontSize: '11px', fontWeight: 700, textTransform: 'uppercase' }}>Live Delivery</div>
-                  <div style={{ fontSize: '28px', fontWeight: 800, color: '#0f172a', marginTop: '8px' }}>{onlineOrders.filter(o => o.status === 'Out for Delivery').length}</div>
-                </div>
-                <div style={{ background: '#fff', borderRadius: '12px', padding: '18px', border: '1px solid #e2e8f0' }}>
-                  <div style={{ color: '#64748b', fontSize: '11px', fontWeight: 700, textTransform: 'uppercase' }}>Commission</div>
-                  <div style={{ fontSize: '28px', fontWeight: 800, color: '#0f172a', marginTop: '8px' }}>₹{onlineOrders.reduce((sum, order) => sum + getOnlineCommission(order), 0).toFixed(2)}</div>
-                </div>
-              </div>
-
-              <div style={{ display: 'grid', gridTemplateColumns: '1.25fr 0.75fr', gap: '18px', marginBottom: '20px' }}>
-                <div style={{ background: '#fff', borderRadius: '12px', border: '1px solid #e2e8f0', padding: '16px' }}>
-                  <div style={{ fontSize: '15px', fontWeight: 800, color: '#0f172a', marginBottom: '14px' }}>API / Webhook Config</div>
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '12px' }}>
-                    <label style={{ fontSize: '12px', color: '#475569', fontWeight: 700 }}>
-                      Zomato API Key
-                      <input value={onlineOrderConfig.zomatoApiKey} onChange={(e) => setOnlineOrderConfig({ ...onlineOrderConfig, zomatoApiKey: e.target.value })} style={{ ...ui.inputField, marginTop: '6px', width: '100%', boxSizing: 'border-box' }} />
-                    </label>
-                    <label style={{ fontSize: '12px', color: '#475569', fontWeight: 700 }}>
-                      Swiggy API Key
-                      <input value={onlineOrderConfig.swiggyApiKey} onChange={(e) => setOnlineOrderConfig({ ...onlineOrderConfig, swiggyApiKey: e.target.value })} style={{ ...ui.inputField, marginTop: '6px', width: '100%', boxSizing: 'border-box' }} />
-                    </label>
-                    <label style={{ fontSize: '12px', color: '#475569', fontWeight: 700 }}>
-                      Webhook Secret
-                      <input value={onlineOrderConfig.webhookSecret} onChange={(e) => setOnlineOrderConfig({ ...onlineOrderConfig, webhookSecret: e.target.value })} style={{ ...ui.inputField, marginTop: '6px', width: '100%', boxSizing: 'border-box' }} />
-                    </label>
-                    <label style={{ fontSize: '12px', color: '#475569', fontWeight: 700 }}>
-                      Default Rider
-                      <input value={onlineOrderConfig.defaultDeliveryPartner} onChange={(e) => setOnlineOrderConfig({ ...onlineOrderConfig, defaultDeliveryPartner: e.target.value })} style={{ ...ui.inputField, marginTop: '6px', width: '100%', boxSizing: 'border-box' }} />
-                    </label>
-                    <label style={{ fontSize: '12px', color: '#475569', fontWeight: 700 }}>
-                      Commission %
-                      <input type="number" value={onlineOrderConfig.commissionRate} onChange={(e) => setOnlineOrderConfig({ ...onlineOrderConfig, commissionRate: Number(e.target.value || 0) })} style={{ ...ui.inputField, marginTop: '6px', width: '100%', boxSizing: 'border-box' }} />
-                    </label>
-                  </div>
-                </div>
-
-                <div style={{ background: '#fff', borderRadius: '12px', border: '1px solid #e2e8f0', padding: '16px' }}>
-                  <div style={{ fontSize: '15px', fontWeight: 800, color: '#0f172a', marginBottom: '14px' }}>Automation</div>
-                  <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', fontSize: '12px', color: '#475569', fontWeight: 700 }}>
-                    Auto accept incoming orders
-                    <input type="checkbox" checked={onlineOrderConfig.autoAccept} onChange={(e) => setOnlineOrderConfig({ ...onlineOrderConfig, autoAccept: e.target.checked })} />
-                  </label>
-                  <div style={{ marginTop: '12px', padding: '10px', borderRadius: '8px', backgroundColor: '#f8fafc', fontSize: '12px', color: '#475569', lineHeight: 1.6 }}>
-                    <b>Workflow:</b><br />
-                    Webhook → Validate → Accept/Reject → Assign delivery rider → Live status sync → Commission tracking.
-                  </div>
-                </div>
-              </div>
-
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '12px' }}>
-                {onlineOrders.map((order) => {
-                  const isZomato = order.source === 'Zomato';
-                  const orderTotal = getOnlineOrderTotal(order);
-                  const commission = getOnlineCommission(order);
-                  const statusColor = order.status === 'Pending' ? '#f59e0b' : order.status === 'Rejected' ? '#dc2626' : order.status === 'Delivered' ? '#10b981' : '#2563eb';
-
-                  return (
-                    <div key={order._id} style={{ backgroundColor: '#fff', borderRadius: '10px', border: '1px solid #e2e8f0', padding: '14px', boxShadow: '0 1px 3px rgba(0,0,0,0.05)' }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-                        <span style={{ fontWeight: 'bold', fontSize: '12px', color: isZomato ? '#dc2626' : '#ea580c' }}>
-                          {isZomato ? '🔴 Zomato' : '🟠 Swiggy'}
-                        </span>
-                        <span style={{ fontSize: '10px', color: '#64748b' }}>{order.time || 'Now'}</span>
-                      </div>
-
-                      <div style={{ fontWeight: '800', fontSize: '14px', color: '#0f172a', marginBottom: '6px' }}>{order.customerName}</div>
-                      <div style={{ fontSize: '11px', color: '#475569', marginBottom: '8px' }}>{order.deliveryAddress || 'Delivery address pending'}</div>
-
-                      <div style={{ fontSize: '11px', color: '#475569', marginBottom: '10px' }}>
-                        {order.items.map((it, i) => (
-                          <div key={i} style={{ display: 'flex', justifyContent: 'space-between', gap: '8px' }}>
-                            <span>{it.qty}x {it.name}</span>
-                            <span>₹{(Number(it.price || 0) * Number(it.qty || 1)).toFixed(2)}</span>
-                          </div>
-                        ))}
-                      </div>
-
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
-                        <span style={{ fontWeight: '800', fontSize: '15px' }}>₹{orderTotal.toFixed(2)}</span>
-                        <span style={{ fontSize: '10px', fontWeight: 'bold', backgroundColor: '#ecfdf5', color: statusColor, padding: '2px 8px', borderRadius: '10px' }}>
-                          {order.status}
-                        </span>
-                      </div>
-
-                      <div style={{ fontSize: '11px', color: '#475569', marginBottom: '10px', display: 'flex', justifyContent: 'space-between' }}>
-                        <span>Partner: {order.deliveryPartner || 'Unassigned'}</span>
-                        <span>Commission: ₹{commission.toFixed(2)}</span>
-                      </div>
-
-                      <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
-                        {order.status !== 'Rejected' && order.status !== 'Delivered' && (
-                          <button onClick={() => handleOnlineOrderAction(order._id, 'accept')} style={{ flex: 1, minWidth: '90px', padding: '7px 8px', borderRadius: '8px', border: 'none', background: '#16a34a', color: '#fff', fontWeight: 700, cursor: 'pointer' }}>Accept</button>
-                        )}
-                        {order.status !== 'Rejected' && order.status !== 'Delivered' && (
-                          <button onClick={() => handleOnlineOrderAction(order._id, 'reject')} style={{ flex: 1, minWidth: '90px', padding: '7px 8px', borderRadius: '8px', border: 'none', background: '#dc2626', color: '#fff', fontWeight: 700, cursor: 'pointer' }}>Reject</button>
-                        )}
-                        {order.status !== 'Rejected' && order.status !== 'Delivered' && (
-                          <button onClick={() => handleOnlineOrderAction(order._id, 'assign')} style={{ flex: 1, minWidth: '90px', padding: '7px 8px', borderRadius: '8px', border: '1px solid #cbd5e1', background: '#fff', color: '#0f172a', fontWeight: 700, cursor: 'pointer' }}>Assign Rider</button>
-                        )}
-                        {order.status !== 'Delivered' && (
-                          <button onClick={() => handleOnlineOrderAction(order._id, 'advance')} style={{ flex: 1, minWidth: '90px', padding: '7px 8px', borderRadius: '8px', border: '1px solid #cbd5e1', background: '#fff', color: '#0f172a', fontWeight: 700, cursor: 'pointer' }}>Advance</button>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
+       {/* ================================================================= */}
+       {/* TAB 4: ONLINE ORDERS (ZOMATO / SWIGGY)                            */}
+       {/* ================================================================= */}
+       {activeTab === 'online' && <OnlineOrders />}
 
           {/* ================================================================= */}
           {/* TAB: WAITER MANAGEMENT & TRACKING                                */}
@@ -3551,7 +4280,7 @@ const topSellingItem = Object.entries(itemSalesSummary).sort((a, b) => b[1] - a[
           {activeTab === 'waiters' && (() => {
             // Group orders by waiterName
             const waiterStats = {};
-            WAITERS_LIST.forEach(w => {
+            waitersList.forEach(w => {
               waiterStats[w] = { name: w, totalOrders: 0, activeOrders: 0, revenue: 0, tables: [] };
             });
             orders.forEach(o => {
@@ -3589,7 +4318,7 @@ const topSellingItem = Object.entries(itemSalesSummary).sort((a, b) => b[1] - a[
                       onChange={(e) => setSelectedWaiter(e.target.value)}
                       style={{ padding: '6px 12px', borderRadius: '6px', border: '1px solid #cbd5e1', fontSize: '13px', fontWeight: 'bold', color: '#0f172a' }}
                     >
-                      {WAITERS_LIST.map(w => <option key={w} value={w}>{w}</option>)}
+                      {waitersList.map(w => <option key={w} value={w}>{w}</option>)}
                     </select>
                   </div>
                 </div>
@@ -3710,162 +4439,13 @@ const topSellingItem = Object.entries(itemSalesSummary).sort((a, b) => b[1] - a[
           {/* ================================================================= */}
         {/* TAB 5: ANALYTICS & SALES REPORT                                  */}
   {/* ================================================================= */}
-  {activeTab === 'analytics' && (() => {
-    const completedOrders = orders.filter(o => o.orderStatus === 'completed' && isOrderInPeriod(o, selectedPeriod));
-    const periodQuantity = completedOrders.reduce((sum, order) => (
-      sum + (order.items || []).reduce((itemSum, item) => itemSum + Number(item.quantity || item.qty || 0), 0)
-    ), 0);
-    
-    const salesByType = { 'Dine-In': 0, 'Takeaway': 0, 'Delivery': 0 };
-    completedOrders.forEach(o => {
-      if (salesByType[o.orderType] !== undefined) {
-        salesByType[o.orderType] += (o.grandTotal || 0);
-      }
-    });
-    const typeChartData = Object.keys(salesByType).map(key => ({
-      name: key,
-      Sales: salesByType[key]
-    }));
-
-    // Calculate Top Selling Items dynamically from completed orders data
-    const itemSalesMap = {};
-    completedOrders.forEach(o => {
-      if (o.items && Array.isArray(o.items)) {
-        o.items.forEach(it => {
-          const itemName = it.name || 'Unknown Item';
-          if (!itemSalesMap[itemName]) {
-            itemSalesMap[itemName] = { quantity: 0, revenue: 0 };
-          }
-          itemSalesMap[itemName].quantity += Number(it.quantity || 1);
-          itemSalesMap[itemName].revenue += Number(it.price || 0) * Number(it.quantity || 1);
-        });
-      }
-    });
-
-    const topSellingItems = Object.keys(itemSalesMap)
-      .map(name => ({
-        name,
-        totalQuantity: itemSalesMap[name].quantity,
-        totalRevenue: itemSalesMap[name].revenue
-      }))
-      .sort((a, b) => b.totalQuantity - a.totalQuantity)
-      .slice(0, 5); // Top 5 items
-
-    return (
-      <div style={{ padding: '24px', backgroundColor: '#f8fafc', flex: 1, overflowY: 'auto' }}>
-        <div className="analytics-heading-row" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '16px', flexWrap: 'wrap', marginBottom: '16px' }}>
-          <div>
-            <h2 style={{ margin: '0 0 4px 0', fontSize: '20px', fontWeight: 'bold', color: '#0f172a' }}>
-              📊 {selectedPeriod} Sales & Demand Analytics
-            </h2>
-            <p style={{ margin: 0, color: '#64748b', fontSize: '13px' }}>
-              Completed bills and item quantities for the selected period.
-            </p>
-          </div>
-          <div className="analytics-period-controls" style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-            {['Today', 'Week', 'Month', 'Year'].map((period) => (
-              <button
-                key={period}
-                onClick={() => setSelectedPeriod(period)}
-                style={{
-                  padding: '9px 15px',
-                  borderRadius: '8px',
-                  border: selectedPeriod === period ? '1px solid #fc4f1a' : '1px solid #cbd5e1',
-                  background: selectedPeriod === period ? '#fff1eb' : '#fff',
-                  color: selectedPeriod === period ? '#c2410c' : '#334155',
-                  fontWeight: '700',
-                  fontSize: '12px',
-                  cursor: 'pointer'
-                }}
-              >
-                {period}
-              </button>
-            ))}
-          </div>
-        </div>
-        
-        {/* Stat Cards */}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, minmax(150px, 1fr))', gap: '14px', marginBottom: '20px' }}>
-          <div style={ui.statCard}>
-            <div style={{ fontSize: '12px', color: '#64748b', fontWeight: '600' }}>TOTAL REVENUE</div>
-            <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#16a34a', marginTop: '6px' }}>
-              ₹{completedOrders.reduce((sum, o) => sum + (o.grandTotal || 0), 0).toFixed(2)}
-            </div>
-          </div>
-          <div style={ui.statCard}>
-            <div style={{ fontSize: '12px', color: '#64748b', fontWeight: '600' }}>COMPLETED ORDERS</div>
-            <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#2563eb', marginTop: '6px' }}>
-              {completedOrders.length}
-            </div>
-          </div>
-          <div style={ui.statCard}>
-            <div style={{ fontSize: '12px', color: '#64748b', fontWeight: '600' }}>RUNNING TABLES</div>
-            <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#fc4f1a', marginTop: '6px' }}>
-              {tables.filter(t => t.status === 'occupied').length}
-            </div>
-          </div>
-          <div style={ui.statCard}>
-            <div style={{ fontSize: '12px', color: '#64748b', fontWeight: '600' }}>ITEM QUANTITY SOLD</div>
-            <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#7c3aed', marginTop: '6px' }}>
-              {periodQuantity}
-            </div>
-          </div>
-          <div style={ui.statCard}>
-            <div style={{ fontSize: '12px', color: '#64748b', fontWeight: '600' }}>AVG BILL SIZE</div>
-            <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#0891b2', marginTop: '6px' }}>
-              ₹{completedOrders.length > 0 ? (completedOrders.reduce((s, o) => s + (o.grandTotal || 0), 0) / completedOrders.length).toFixed(0) : '0'}
-            </div>
-          </div>
-        </div>
-
-        {/* Charts & Top Items Grid Layout */}
-        <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '20px' }}>
-          
-          {/* Revenue by Order Type Chart */}
-          <div style={{ backgroundColor: '#ffffff', padding: '20px', borderRadius: '10px', boxShadow: '0 4px 6px -1px rgba(0,0,0,0.05)', border: '1px solid #e2e8f0' }}>
-            <h3 style={{ margin: '0 0 16px 0', fontSize: '16px', color: '#0f172a' }}>Revenue by Order Type</h3>
-            <div style={{ width: '100%', height: 300 }}>
-              <ResponsiveContainer>
-                <BarChart data={typeChartData}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                  <XAxis dataKey="name" axisLine={false} tickLine={false} />
-                  <YAxis axisLine={false} tickLine={false} />
-                  <Tooltip cursor={{ fill: '#f1f5f9' }} />
-                  <Bar dataKey="Sales" fill="#fc4f1a" radius={[4, 4, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
-
-          {/* Top Selling Items Box */}
-          <div style={{ backgroundColor: '#ffffff', padding: '20px', borderRadius: '10px', boxShadow: '0 4px 6px -1px rgba(0,0,0,0.05)', border: '1px solid #e2e8f0' }}>
-            <h3 style={{ margin: '0 0 16px 0', fontSize: '16px', color: '#0f172a' }}>🔥 Top Selling Items</h3>
-            {topSellingItems.length === 0 ? (
-              <p style={{ fontSize: '13px', color: '#64748b' }}>No completed orders yet.</p>
-            ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                {topSellingItems.map((item, index) => (
-                  <div key={index} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #f1f5f9', paddingBottom: '8px' }}>
-                    <div>
-                      <span style={{ fontSize: '12px', fontWeight: 'bold', color: '#94a3b8', marginRight: '6px' }}>#{index + 1}</span>
-                      <span style={{ fontSize: '14px', fontWeight: '600', color: '#1e293b' }}>{item.name}</span>
-                    </div>
-                    <div style={{ textAlign: 'right' }}>
-                      <span style={{ backgroundColor: '#dcfce7', color: '#15803d', fontSize: '11px', fontWeight: 'bold', padding: '2px 6px', borderRadius: '4px', marginRight: '6px' }}>
-                        {item.totalQuantity} sold
-                      </span>
-                      <span style={{ fontSize: '13px', fontWeight: 'bold', color: '#0f172a' }}>₹{item.totalRevenue}</span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-
-        </div>
-      </div>
-    );
-  })()}
+  {activeTab === 'analytics' && (
+    <AdvancedAnalytics
+      orders={orders}
+      selectedPeriod={selectedPeriod}
+      onPeriodChange={setSelectedPeriod}
+    />
+  )}
 
           {/* ================================================================= */}
           {/* TAB 6: PAYMENTS TAB                                               */}
@@ -4533,7 +5113,180 @@ order={settleOrderModal}
 restaurantSettings={restaurantSettings}
 onClose={() => setSettleOrderModal(null)}
 onConfirmSettle={handleConfirmSettle}
+onSendWhatsApp={() => handleSendWhatsApp(settleOrderModal)}
 />
+)}
+
+{itemizedSplitModal && (
+  <div style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.65)', backdropFilter: 'blur(3px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999, padding: '20px' }}>
+    <div style={{ background: '#fff', borderRadius: '16px', maxWidth: '640px', width: '100%', maxHeight: '90vh', overflowY: 'auto', padding: '24px', boxShadow: '0 10px 35px rgba(0,0,0,0.25)' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+        <div>
+          <h3 style={{ margin: 0, fontSize: '18px', fontWeight: '800', color: '#0f172a' }}>
+            🔀 Itemized Split Bill
+          </h3>
+          <p style={{ margin: '4px 0 0 0', fontSize: '12px', color: '#64748b' }}>
+            Assign dishes to Bill A or Bill B for individual customer billing.
+          </p>
+        </div>
+        <button onClick={() => setItemizedSplitModal(null)} style={{ background: '#f1f5f9', border: 0, borderRadius: '50%', width: '32px', height: '32px', cursor: 'pointer', fontWeight: 'bold' }}>✕</button>
+      </div>
+
+      {/* Items list with Bill A / B buttons */}
+      <div style={{ marginBottom: '16px', border: '1px solid #e2e8f0', borderRadius: '10px', overflow: 'hidden' }}>
+        <div style={{ background: '#f8fafc', padding: '8px 12px', borderBottom: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', fontSize: '12px', fontWeight: 'bold', color: '#475569' }}>
+          <span>Dish & Quantity</span>
+          <span>Assign Bill</span>
+        </div>
+        <div style={{ maxHeight: '200px', overflowY: 'auto' }}>
+          {(itemizedSplitModal.items || []).map((item, idx) => {
+            const currentAssign = splitAssignments[idx] || 'A';
+            return (
+              <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 12px', borderBottom: '1px solid #f1f5f9' }}>
+                <div>
+                  <span style={{ fontWeight: '600', fontSize: '13px' }}>{item.name}</span>
+                  <span style={{ fontSize: '11px', color: '#64748b', marginLeft: '6px' }}>×{item.quantity} (₹{(item.price * item.quantity).toFixed(2)})</span>
+                </div>
+                <div style={{ display: 'flex', gap: '4px' }}>
+                  <button
+                    type="button"
+                    onClick={() => setSplitAssignments(prev => ({ ...prev, [idx]: 'A' }))}
+                    style={{
+                      padding: '4px 10px',
+                      borderRadius: '6px',
+                      border: currentAssign === 'A' ? '2px solid #2563eb' : '1px solid #cbd5e1',
+                      background: currentAssign === 'A' ? '#eff6ff' : '#fff',
+                      color: currentAssign === 'A' ? '#2563eb' : '#64748b',
+                      fontWeight: 'bold',
+                      fontSize: '11px',
+                      cursor: 'pointer'
+                    }}
+                  >
+                    Bill A
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSplitAssignments(prev => ({ ...prev, [idx]: 'B' }))}
+                    style={{
+                      padding: '4px 10px',
+                      borderRadius: '6px',
+                      border: currentAssign === 'B' ? '2px solid #7c3aed' : '1px solid #cbd5e1',
+                      background: currentAssign === 'B' ? '#faf5ff' : '#fff',
+                      color: currentAssign === 'B' ? '#7c3aed' : '#64748b',
+                      fontWeight: 'bold',
+                      fontSize: '11px',
+                      cursor: 'pointer'
+                    }}
+                  >
+                    Bill B
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Bill A & Bill B Calculation Previews */}
+      {(() => {
+        const allItems = itemizedSplitModal.items || [];
+        const itemsA = allItems.filter((_, idx) => (splitAssignments[idx] || 'A') === 'A');
+        const itemsB = allItems.filter((_, idx) => (splitAssignments[idx] || 'A') === 'B');
+
+        const calc = (list) => {
+          const sub = list.reduce((sum, i) => sum + (Number(i.price) * Number(i.quantity || 1)), 0);
+          const tax = Number((sub * 0.05).toFixed(2));
+          return { sub, tax, total: Number((sub + tax).toFixed(2)) };
+        };
+
+        const resA = calc(itemsA);
+        const resB = calc(itemsB);
+
+        return (
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '16px' }}>
+            {/* Bill A Box */}
+            <div style={{ border: '2px solid #bfdbfe', background: '#eff6ff', borderRadius: '12px', padding: '12px' }}>
+              <div style={{ fontWeight: '800', color: '#1d4ed8', fontSize: '14px', marginBottom: '6px' }}>
+                🧾 Bill A ({itemsA.length} items)
+              </div>
+              <div style={{ fontSize: '12px', color: '#475569', display: 'flex', flexDirection: 'column', gap: '3px', marginBottom: '8px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span>Subtotal:</span><span>₹{resA.sub.toFixed(2)}</span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span>GST (5%):</span><span>₹{resA.tax.toFixed(2)}</span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 'bold', color: '#0f172a', borderTop: '1px solid #bfdbfe', paddingTop: '3px' }}>
+                  <span>Total:</span><span>₹{resA.total.toFixed(2)}</span>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  sendWhatsAppBill({
+                    ...itemizedSplitModal,
+                    invoiceNumber: `${itemizedSplitModal.invoiceNumber || 'INV'}-A`,
+                    tableLabel: `${selectedTable?.tableNo || 'Table'} (Split A)`,
+                    items: itemsA,
+                    subTotal: resA.sub,
+                    tax: resA.tax,
+                    grandTotal: resA.total
+                  }, restaurantSettings);
+                }}
+                disabled={itemsA.length === 0}
+                style={{ width: '100%', padding: '6px', background: '#25d366', color: '#fff', border: 0, borderRadius: '6px', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer' }}
+              >
+                📲 WhatsApp Bill A
+              </button>
+            </div>
+
+            {/* Bill B Box */}
+            <div style={{ border: '2px solid #e9d5ff', background: '#faf5ff', borderRadius: '12px', padding: '12px' }}>
+              <div style={{ fontWeight: '800', color: '#7e22ce', fontSize: '14px', marginBottom: '6px' }}>
+                🧾 Bill B ({itemsB.length} items)
+              </div>
+              <div style={{ fontSize: '12px', color: '#475569', display: 'flex', flexDirection: 'column', gap: '3px', marginBottom: '8px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span>Subtotal:</span><span>₹{resB.sub.toFixed(2)}</span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span>GST (5%):</span><span>₹{resB.tax.toFixed(2)}</span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 'bold', color: '#0f172a', borderTop: '1px solid #e9d5ff', paddingTop: '3px' }}>
+                  <span>Total:</span><span>₹{resB.total.toFixed(2)}</span>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  sendWhatsAppBill({
+                    ...itemizedSplitModal,
+                    invoiceNumber: `${itemizedSplitModal.invoiceNumber || 'INV'}-B`,
+                    tableLabel: `${selectedTable?.tableNo || 'Table'} (Split B)`,
+                    items: itemsB,
+                    subTotal: resB.sub,
+                    tax: resB.tax,
+                    grandTotal: resB.total
+                  }, restaurantSettings);
+                }}
+                disabled={itemsB.length === 0}
+                style={{ width: '100%', padding: '6px', background: '#25d366', color: '#fff', border: 0, borderRadius: '6px', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer' }}
+              >
+                📲 WhatsApp Bill B
+              </button>
+            </div>
+          </div>
+        );
+      })()}
+
+      <button
+        onClick={() => setItemizedSplitModal(null)}
+        style={{ width: '100%', padding: '10px', background: '#0f172a', color: '#fff', border: 0, borderRadius: '8px', fontWeight: 'bold', cursor: 'pointer', fontSize: '13px' }}
+      >
+        Close Split View
+      </button>
+    </div>
+  </div>
 )}
 
 {shiftTableModal && (

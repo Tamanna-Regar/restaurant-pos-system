@@ -38,6 +38,17 @@ const tableSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Order',
       default: null
+    },
+
+    mergedWith: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Table',
+      default: null
+    },
+
+    isMerged: {
+      type: Boolean,
+      default: false
     }
   },
   {

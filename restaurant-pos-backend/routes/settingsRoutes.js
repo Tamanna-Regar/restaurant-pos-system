@@ -3,9 +3,9 @@ const RestaurantSettings = require('../models/RestaurantSettings');
 
 const router = express.Router();
 
-const defaults = { name: 'Tamanna Restaurant', address: '', phone: '', gstin: '', upiId: '' };
+const defaults = { name: 'Tamanna Restaurant', address: '', phone: '', gstin: '', fssai: '', upiId: '' };
 
-router.get('/restaurant', async (req, res) => {
+router.get(['/', '/restaurant'], async (req, res) => {
   try {
     const settings = await RestaurantSettings.findOne().lean();
     res.json({ success: true, data: settings || defaults });
@@ -24,6 +24,7 @@ router.put('/restaurant', async (req, res) => {
       address: String(req.body.address || '').trim(),
       phone: String(req.body.phone || '').trim(),
       gstin: String(req.body.gstin || '').trim().toUpperCase(),
+      fssai: String(req.body.fssai || '').trim(),
       upiId: String(req.body.upiId || '').trim(),
       updatedBy: req.user._id
     };

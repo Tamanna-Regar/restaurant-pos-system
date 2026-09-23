@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const express = require('express');
 const OnlineOrder = require('../models/OnlineOrder');
+const Order = require('../models/Order');
 
 const router = express.Router();
 const allowedStatuses = [
@@ -142,6 +143,54 @@ router.post('/accept/:id', async (req, res) => {
     order.statusHistory.push({ status: 'Accepted', updatedBy: req.body?.updatedBy || 'Staff' });
     await order.save();
     emitOrderEvent(req, 'online-order-updated', order);
+
+    // KDS Sync: Push KOT to kitchen display system
+    try {
+      const kotItems = order.items.map(it => ({
+        itemId: it.itemId || null,
+        name: it.name,
+        foodType: 'veg',
+        portion: 'Full',
+        price: it.price,
+        basePrice: it.price,
+        quantity: it.quantity,
+        notes: `Online: ${order.provider} #${order.providerOrderId}`,
+        itemStatus: 'placed'
+      }));
+
+      const newOrder = await Order.create({
+        orderType: 'Delivery',
+        customerName: `${order.provider}: ${order.customerName}`,
+        customerPhone: order.customerPhone || '',
+        deliveryAddress: order.deliveryAddress || 'Online Delivery',
+        waiterName: order.provider,
+        priority: 'Urgent',
+        items: kotItems,
+        kots: [{
+          kotNumber: 1,
+          punchedAt: new Date(),
+          status: 'placed',
+          items: kotItems
+        }],
+        subTotal: order.subtotal,
+        grandTotal: order.subtotal
+      });
+
+      const io = req.app.get('io');
+      if (io) {
+        io.emit('new-kot', {
+          orderId: newOrder._id,
+          kotNumber: 1,
+          tableNo: `${order.provider} #${order.providerOrderId}`,
+          orderType: 'Delivery',
+          items: kotItems
+        });
+        io.emit('order-placed', newOrder);
+      }
+    } catch (kdsErr) {
+      console.error('KDS sync error on online order accept:', kdsErr);
+    }
+
     res.json({ success: true, data: order });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -228,6 +277,69 @@ router.get('/summary', async (req, res) => {
         accepted: active,
         commission: Number((commission[0]?.total || 0).toFixed(2))
       }
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+router.post('/simulate', async (req, res) => {
+  try {
+    const provider = req.body.provider === 'Swiggy' ? 'Swiggy' : (req.body.provider === 'Direct' ? 'Direct' : 'Zomato');
+    const randomNum = Math.floor(1000 + Math.random() * 9000);
+    const providerOrderId = `${provider.toUpperCase().slice(0, 3)}-${randomNum}`;
+
+    const sampleItemsPool = [
+      { name: 'Paneer Butter Masala', price: 280 },
+      { name: 'Butter Naan', price: 45 },
+      { name: 'Veg Biryani Special', price: 240 },
+      { name: 'Dal Makhani', price: 220 },
+      { name: 'Garlic Naan', price: 55 },
+      { name: 'Chicken Tikka Masala', price: 340 },
+      { name: 'Gulab Jamun (2 Pcs)', price: 80 }
+    ];
+
+    const shuffled = [...sampleItemsPool].sort(() => 0.5 - Math.random());
+    const selectedCount = Math.floor(Math.random() * 2) + 2;
+    const orderItems = shuffled.slice(0, selectedCount).map(dish => ({
+      name: dish.name,
+      quantity: Math.floor(Math.random() * 2) + 1,
+      price: dish.price
+    }));
+
+    const sampleCustomers = [
+      { name: 'Aarav Sharma', phone: '9823012345', address: 'Flat 402, Royal Palms, Civil Lines' },
+      { name: 'Pooja Verma', phone: '9890123456', address: 'House 12, Green Park Avenue' },
+      { name: 'Rohan Mehra', phone: '9765432109', address: 'Plot 88, Sector 14, Ring Road' },
+      { name: 'Ananya Gupta', phone: '9911223344', address: 'B-201, Silver Heights, MG Road' }
+    ];
+    const customer = sampleCustomers[Math.floor(Math.random() * sampleCustomers.length)];
+
+    const simulatedOrder = new OnlineOrder({
+      provider,
+      providerOrderId,
+      customerName: customer.name,
+      customerPhone: customer.phone,
+      deliveryAddress: customer.address,
+      status: 'Pending',
+      items: orderItems,
+      commissionRate: provider === 'Direct' ? 0 : 18
+    });
+
+    simulatedOrder.recalculateTotals();
+    simulatedOrder.statusHistory = [{
+      status: 'Pending',
+      timestamp: new Date(),
+      updatedBy: 'Simulator'
+    }];
+
+    await simulatedOrder.save();
+    emitOrderEvent(req, 'online-order-created', simulatedOrder);
+
+    res.status(201).json({
+      success: true,
+      message: `Simulated ${provider} order #${providerOrderId} generated successfully!`,
+      data: simulatedOrder
     });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });

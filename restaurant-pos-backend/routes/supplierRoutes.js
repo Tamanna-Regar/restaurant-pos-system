@@ -78,8 +78,8 @@ router.get('/summary', async (req, res) => {
   try {
     const [purchases, payments, returns] = await Promise.all([
       PurchaseOrder.aggregate([
-        { $match: { status: 'Received' } },
-        { $group: { _id: '$supplierName', receivedPurchases: { $sum: '$totalAmount' }, purchaseCount: { $sum: 1 } } }
+        { $match: { status: { $in: ['Received', 'Partially Received'] } } },
+        { $group: { _id: '$supplierName', receivedPurchases: { $sum: { $multiply: ['$receivedQuantity', '$unitPrice'] } }, purchaseCount: { $sum: 1 } } }
       ]),
       SupplierPayment.aggregate([
         { $group: { _id: '$supplierName', paidAmount: { $sum: '$amount' }, paymentCount: { $sum: 1 } } }
@@ -112,11 +112,11 @@ router.get('/ledger', async (req, res) => {
     const supplierName = normalizeName(req.query.supplierName);
     if (!supplierName) return res.status(400).json({ success: false, message: 'supplierName is required' });
     const [purchases, payments, returns] = await Promise.all([
-      PurchaseOrder.find({ supplierName, status: 'Received' }).sort({ receivedAt: -1, createdAt: -1 }),
+      PurchaseOrder.find({ supplierName, status: { $in: ['Received', 'Partially Received'] } }).sort({ receivedAt: -1, createdAt: -1 }),
       SupplierPayment.find({ supplierName }).sort({ paidAt: -1 }),
       PurchaseReturn.find({ supplierName }).sort({ returnedAt: -1 })
     ]);
-    const receivedTotal = purchases.reduce((sum, row) => sum + Number(row.totalAmount || 0), 0);
+    const receivedTotal = purchases.reduce((sum, row) => sum + Number((row.receivedQuantity || 0) * (row.unitPrice || 0)), 0);
     const paidTotal = payments.reduce((sum, row) => sum + Number(row.amount || 0), 0);
     const returnedTotal = returns.reduce((sum, row) => sum + Number(row.amount || 0), 0);
     res.json({ success: true, data: { supplierName, purchases, payments, returns, receivedTotal, paidTotal, returnedTotal, outstanding: Number((receivedTotal - returnedTotal - paidTotal).toFixed(2)) } });

@@ -9,7 +9,7 @@ const TableTransferModal = ({ isOpen, onClose, currentTable, allTables, onTransf
   if (!isOpen || !currentTable) return null;
 
   // Filter out the current table from target options (only show available tables)
-  const availableTargetTables = allTables.filter(t => t._id !== currentTable._id && t.status === 'available');
+  const availableTargetTables = (Array.isArray(allTables) ? allTables : []).filter(t => t && t._id !== currentTable?._id && t.status === 'available');
   const handleTransfer = async () => {
     if (!targetTableId) {
       setError('Please select a target table.');

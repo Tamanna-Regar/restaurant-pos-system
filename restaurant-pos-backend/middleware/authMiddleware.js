@@ -33,10 +33,32 @@ const authenticate = async (req, res, next) => {
 };
 
 const authorize = (...roles) => (req, res, next) => {
-  if (!req.user || !roles.includes(req.user.role)) {
+  const allowed = roles.map((r) => String(r).toLowerCase());
+  const userRole = String(req.user?.role || '').toLowerCase();
+  if (!req.user || !allowed.includes(userRole)) {
     return res.status(403).json({ success: false, message: 'You do not have permission for this action' });
   }
   next();
 };
 
-module.exports = { authenticate, authorize };
+const optionalAuthenticate = async (req, res, next) => {
+  const token = getToken(req);
+  if (!token) return next();
+
+  try {
+    const secret = process.env.JWT_SECRET_KEY;
+    if (secret) {
+      const payload = jwt.verify(token, secret);
+      const user = await User.findById(payload.id).select('-password');
+      if (user && user.isActive) {
+        req.user = user;
+      }
+    }
+  } catch (error) {
+    // Silently continue for optional authentication
+  }
+  next();
+};
+
+module.exports = { authenticate, authorize, optionalAuthenticate };
+

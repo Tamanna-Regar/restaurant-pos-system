@@ -8,6 +8,8 @@ const Ingredient = require('../models/Ingredient');
 const InventoryLedger = require('../models/InventoryLedger');
 const SalaryPayment = require('../models/SalaryPayment');
 const { getBranchScope } = require('../utils/branchScope');
+const { generateSalesReportWorkbook, generateInventoryWorkbook } = require('../utils/excelExportHelper');
+const { generateTallySalesXml } = require('../utils/tallyExportHelper');
 
 const router = express.Router();
 
@@ -178,6 +180,85 @@ router.get('/food-cost', async (req, res) => {
     res.json({ success: true, data: { from, to, rows, totalSales, totalCost, foodCostPercent: totalSales ? Number(((totalCost / totalSales) * 100).toFixed(2)) : 0, grossMargin: Number((totalSales - totalCost).toFixed(2)) } });
   } catch (error) {
     res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// Excel Export: Detailed Sales & Settlements
+router.get('/export/sales-excel', async (req, res) => {
+  try {
+    const { from, to, range } = getRange(req);
+    const branch = getBranchScope(req);
+
+    const [payments, topItems] = await Promise.all([
+      Payment.find({ ...branch, status: 'paid', settledAt: range })
+        .populate({ path: 'orderId', populate: { path: 'tableId', select: 'tableNo' } })
+        .sort({ settledAt: -1 })
+        .lean(),
+      Order.aggregate([
+        { $match: { ...branch, createdAt: range, orderStatus: { $ne: 'cancelled' } } },
+        { $unwind: '$items' },
+        { $group: { _id: '$items.name', quantity: { $sum: '$items.quantity' }, sales: { $sum: { $multiply: ['$items.price', '$items.quantity'] } } } },
+        { $sort: { sales: -1 } },
+        { $limit: 100 }
+      ])
+    ]);
+
+    const workbook = await generateSalesReportWorkbook({ payments, topItems, from, to });
+    const filename = `Sales_Report_${from}_to_${to}.xlsx`;
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+
+    await workbook.xlsx.write(res);
+    res.end();
+  } catch (error) {
+    console.error('Sales Excel Export Error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Excel Export: Current Inventory Stock & Valuation
+router.get('/export/inventory-excel', async (req, res) => {
+  try {
+    const ingredients = await Ingredient.find().sort({ category: 1, name: 1 }).lean();
+    const workbook = await generateInventoryWorkbook(ingredients);
+    const filename = `Inventory_Stock_${new Date().toISOString().slice(0, 10)}.xlsx`;
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+
+    await workbook.xlsx.write(res);
+    res.end();
+  } catch (error) {
+    console.error('Inventory Excel Export Error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Tally ERP & TallyPrime: Sales Vouchers XML Export
+router.get('/export/tally-xml', async (req, res) => {
+  try {
+    const { from, to, range } = getRange(req);
+    const branch = getBranchScope(req);
+
+    const payments = await Payment.find({ ...branch, status: 'paid', settledAt: range })
+      .populate('orderId')
+      .sort({ settledAt: 1 })
+      .lean();
+
+    const xmlContent = generateTallySalesXml(payments, {
+      companyName: 'Tamanna Restaurant',
+      from,
+      to
+    });
+
+    const filename = `Tally_Sales_${from}_to_${to}.xml`;
+    res.setHeader('Content-Type', 'application/xml; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(xmlContent);
+  } catch (error) {
+    console.error('Tally XML Export Error:', error);
+    res.status(500).json({ success: false, message: error.message });
   }
 });
 

@@ -476,7 +476,12 @@ const seedData = async () => {
       { tableNo: 2, tableNumber: 2, capacity: 4, floor: 'Veg Floor', type: 'Dining', status: 'available' },
       { tableNo: 3, tableNumber: 3, capacity: 4, floor: 'Veg Floor', type: 'Dining', status: 'available' },
       { tableNo: 4, tableNumber: 4, capacity: 6, floor: 'Veg Floor', type: 'Dining', status: 'available' },
-      
+      { tableNo: 5, tableNumber: 5, capacity: 4, floor: 'Veg Floor', type: 'Dining', status: 'available' },
+      { tableNo: 6, tableNumber: 6, capacity: 4, floor: 'Veg Floor', type: 'Dining', status: 'available' },
+      { tableNo: 7, tableNumber: 7, capacity: 4, floor: 'Veg Floor', type: 'Dining', status: 'available' },
+      { tableNo: 8, tableNumber: 8, capacity: 6, floor: 'Veg Floor', type: 'Dining', status: 'available' },
+      { tableNo: 9, tableNumber: 9, capacity: 6, floor: 'Veg Floor', type: 'Dining', status: 'available' },
+
       // Birthday Party Zone
       { tableNo: 101, tableNumber: 101, capacity: 12, floor: 'Birthday Party Zone', type: 'Party Hall', status: 'available' },
       { tableNo: 102, tableNumber: 102, capacity: 20, floor: 'Birthday Party Zone', type: 'Birthday Zone', status: 'available' }

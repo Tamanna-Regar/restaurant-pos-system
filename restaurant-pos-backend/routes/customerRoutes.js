@@ -4,6 +4,22 @@ const Order = require('../models/Order');
 
 const router = express.Router();
 
+router.get('/', async (req, res) => {
+  try {
+    const { search, q } = req.query;
+    const filter = {};
+    const searchTerm = (search || q || '').trim();
+    if (searchTerm) {
+      const regex = new RegExp(searchTerm.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&'), 'i');
+      filter.$or = [{ name: regex }, { phone: regex }, { email: regex }];
+    }
+    const customers = await Customer.find(filter).sort({ updatedAt: -1 }).limit(100);
+    res.json({ success: true, data: customers });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
 router.get('/history/:phone', async (req, res) => {
   try {
     const phone = String(req.params.phone || '').replace(/\D/g, '');

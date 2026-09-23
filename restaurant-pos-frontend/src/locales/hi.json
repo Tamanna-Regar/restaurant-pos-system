@@ -1,0 +1,86 @@
+{
+  "app": {
+    "title": "तमन्ना रेस्टोरेंट पीओएस",
+    "pureVeg": "१००% शुद्ध शाकाहारी",
+    "welcome": "स्वागत है",
+    "logout": "लॉग आउट",
+    "profile": "प्रोफ़ाइल"
+  },
+  "nav": {
+    "pos": "बिलिंग (पीओएस)",
+    "tables": "टेबल्स",
+    "kitchen": "रसोई (KDS)",
+    "orders": "ऑर्डर्स",
+    "inventory": "स्टॉक / सामग्री",
+    "customers": "ग्राहक (CRM)",
+    "reports": "रिपोर्ट्स और बिक्री",
+    "staff": "स्टाफ प्रबंधन",
+    "expenses": "खर्चे (Expenses)",
+    "shifts": "शिफ्ट और डे-एंड",
+    "settings": "सेटिंग्स"
+  },
+  "common": {
+    "save": "सुरक्षित करें",
+    "cancel": "रद्द करें",
+    "delete": "हटाएं",
+    "edit": "संपादित करें",
+    "add": "जोड़ें",
+    "search": "खोजें...",
+    "filter": "फ़िल्टर",
+    "actions": "कार्य",
+    "status": "स्थिति",
+    "loading": "लोड हो रहा है...",
+    "success": "सफल",
+    "error": "त्रुटि",
+    "confirm": "पुष्टि करें",
+    "back": "वापस",
+    "print": "प्रिंट करें",
+    "downloadPdf": "पीडीएफ डाउनलोड",
+    "exportExcel": "एक्सेल निर्यात",
+    "scanBarcode": "बारकोड स्कैन",
+    "sendWhatsApp": "व्हाट्सएप भेजें"
+  },
+  "kds": {
+    "title": "किचन डिस्प्ले सिस्टम (KDS)",
+    "pureVegKitchen": "शुद्ध शाकाहारी लाइव किचन मॉनिटर",
+    "allStations": "सभी स्टेशन",
+    "mainKitchen": "मुख्य रसोई",
+    "tandoor": "तंदूर",
+    "pantry": "पेंट्री",
+    "beverages": "पेय पदार्थ",
+    "desserts": "मिठाई / डेसर्ट",
+    "activeOrders": "सक्रिय KOT",
+    "avgWait": "औसत तैयारी समय",
+    "table": "टेबल",
+    "waiter": "वेटर",
+    "markReady": "सब तैयार करें",
+    "noOrders": "रसोई में कोई लंबित ऑर्डर नहीं है। सभी टेबलों को परोसा गया!"
+  },
+  "pos": {
+    "selectCategory": "श्रेणी चुनें",
+    "all": "सभी व्यंजन",
+    "cart": "वर्तमान ऑर्डर",
+    "emptyCart": "अभी कोई व्यंजन नहीं चुना गया",
+    "subtotal": "उप-योग (Subtotal)",
+    "discount": "छूट (Discount)",
+    "gst": "जीएसटी (GST 5%)",
+    "grandTotal": "कुल राशि (Grand Total)",
+    "payNow": "भुगतान करें",
+    "sendToKitchen": "KOT (रसोई भेजें)",
+    "paymentMode": "भुगतान का प्रकार",
+    "cash": "नकद (Cash)",
+    "card": "कार्ड (Card)",
+    "upi": "यूपीआई / क्यूआर",
+    "razorpay": "रेज़रपे ऑनलाइन"
+  },
+  "inventory": {
+    "title": "स्टॉक और सामग्री प्रबंधन",
+    "stockLevel": "स्टॉक स्तर",
+    "lowStockAlert": "कम स्टॉक चेतावनी",
+    "addNewItem": "नया कच्चा माल जोड़ें",
+    "unit": "इकाई",
+    "costPerUnit": "प्रति इकाई मूल्य",
+    "quantity": "मात्रा"
+  }
+}
+

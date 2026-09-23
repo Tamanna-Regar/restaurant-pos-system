@@ -1,0 +1,262 @@
+openapi: 3.0.3
+info:
+  title: Tamanna Restaurant POS API
+  description: >
+    Comprehensive REST API documentation for Tamanna Restaurant Pure Vegetarian POS & ERP System.
+    Includes Point of Sale, KDS, Dynamic Tables, Razorpay Online Gateway, SMS/OTP, Automated Cron Scheduling,
+    Excel/PDF document exports, and Real-time WebSockets.
+  version: 1.0.0
+  contact:
+    name: Tamanna Restaurant IT Support
+    email: support@tamannarestaurant.com
+servers:
+  - url: http://localhost:5000
+    description: Local Development & POS Server
+paths:
+  /api/health:
+    get:
+      summary: Health check endpoint
+      tags:
+        - System
+      responses:
+        '200':
+          description: Server and database status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: "ok" }
+                  message: { type: string, example: "Tamanna Restaurant POS running" }
+
+  /api/auth/login:
+    post:
+      summary: Authenticate user (staff/admin) and receive JWT
+      tags:
+        - Authentication
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string, example: "admin" }
+                password: { type: string, example: "admin123" }
+      responses:
+        '200':
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: { type: string }
+                  user: { type: object }
+
+  /api/auth/send-otp:
+    post:
+      summary: Send OTP for mobile login or registration
+      tags:
+        - Authentication
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone]
+              properties:
+                phone: { type: string, example: "9876543210" }
+      responses:
+        '200':
+          description: OTP dispatched successfully
+
+  /api/auth/verify-otp:
+    post:
+      summary: Verify mobile OTP
+      tags:
+        - Authentication
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone, otp]
+              properties:
+                phone: { type: string, example: "9876543210" }
+                otp: { type: string, example: "123456" }
+      responses:
+        '200':
+          description: OTP verified successfully
+
+  /api/tables:
+    get:
+      summary: List all restaurant tables with live occupancy status
+      tags:
+        - Tables
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Array of tables
+
+  /api/orders:
+    get:
+      summary: Fetch active and historical dining orders
+      tags:
+        - Orders
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: List of orders
+    post:
+      summary: Create new order / KOT
+      tags:
+        - Orders
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tableId, items]
+              properties:
+                tableId: { type: string }
+                items:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      name: { type: string }
+                      price: { type: number }
+                      quantity: { type: integer }
+      responses:
+        '201':
+          description: Order created and KOT broadcasted
+
+  /api/orders/invoice/{id}/pdf:
+    get:
+      summary: Download official Pure Veg GST Invoice as PDF
+      tags:
+        - Invoices
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Binary PDF receipt file
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+
+  /api/payments/razorpay/create-order:
+    post:
+      summary: Initialize Razorpay order with Key ID & Secret
+      tags:
+        - Payments
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount]
+              properties:
+                amount: { type: number, example: 500 }
+                orderId: { type: string }
+      responses:
+        '200':
+          description: Razorpay order ID and checkout config
+
+  /api/payments/razorpay/verify-payment:
+    post:
+      summary: Verify Razorpay HMAC SHA256 payment signature
+      tags:
+        - Payments
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [razorpay_order_id, razorpay_payment_id, razorpay_signature]
+              properties:
+                razorpay_order_id: { type: string }
+                razorpay_payment_id: { type: string }
+                razorpay_signature: { type: string }
+                orderId: { type: string }
+      responses:
+        '200':
+          description: Payment verified and order settled
+
+  /api/upload/image:
+    post:
+      summary: Upload menu item or staff photo
+      tags:
+        - Media & Uploads
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                image:
+                  type: string
+                  format: binary
+      responses:
+        '200':
+          description: File uploaded successfully with public URL
+
+  /api/reports/export/sales-excel:
+    get:
+      summary: Export sales and tax breakdown to Microsoft Excel (.xlsx)
+      tags:
+        - Reports & Exports
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Multi-sheet Excel workbook
+          content:
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema:
+                type: string
+                format: binary
+
+  /api/reports/export/inventory-excel:
+    get:
+      summary: Export current inventory stock & valuation to Microsoft Excel (.xlsx)
+      tags:
+        - Reports & Exports
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Multi-sheet Excel workbook
+          content:
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema:
+                type: string
+                format: binary
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+

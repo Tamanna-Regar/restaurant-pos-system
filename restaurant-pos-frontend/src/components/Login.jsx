@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { api } from '../api';
+import { announceAuditEvent, playTone } from '../utils/audioAlert';
 
 // ---------------------------------------------------------------------------
 // Login Component
@@ -10,6 +11,8 @@ export function Login({ onLoginSuccess }) {
   const [signupData, setSignupData] = useState({ name: '', email: '', password: '', confirmPassword: '', role: 'waiter' });
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [feedback, setFeedback] = useState({ type: '', text: '' });
+
+  const [pin, setPin] = useState('');
 
   const normalizeRole = (role) => String(role || 'admin').toLowerCase();
 
@@ -73,10 +76,35 @@ export function Login({ onLoginSuccess }) {
       localStorage.setItem('token', res.data.token);
       localStorage.setItem('refreshToken', res.data.refreshToken);
       localStorage.setItem('user', JSON.stringify(res.data.user));
+      announceAuditEvent('LOGIN_SUCCESS', { userName: res.data.user?.name });
       onLoginSuccess();
     } catch (err) {
+      playTone('warning');
       const message = err.response?.data?.message || 'Authentication failed.';
       setFeedback({ type: 'error', text: message });
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handlePinLogin = async (e) => {
+    if (e) e.preventDefault();
+    if (!pin || pin.length < 4) {
+      setFeedback({ type: 'error', text: 'Enter your 4-digit PIN.' });
+      return;
+    }
+    try {
+      setIsSubmitting(true);
+      setFeedback({ type: '', text: '' });
+      const res = await api.post('/auth/login-pin', { pin, role: selectedRole });
+      localStorage.setItem('token', res.data.token);
+      localStorage.setItem('refreshToken', res.data.refreshToken);
+      localStorage.setItem('user', JSON.stringify(res.data.user));
+      announceAuditEvent('LOGIN_SUCCESS', { userName: res.data.user?.name });
+      onLoginSuccess();
+    } catch (err) {
+      setFeedback({ type: 'error', text: err.response?.data?.message || 'Invalid PIN' });
+      setPin('');
     } finally {
       setIsSubmitting(false);
     }
@@ -103,11 +131,103 @@ export function Login({ onLoginSuccess }) {
         <div style={loginStyles.formCard}>
           <div style={loginStyles.eyebrow}>TAMANNA RESTAURANT · POS</div>
           <h2 style={loginStyles.title}>{mode === 'login' ? 'Welcome back' : 'Create staff account'}</h2>
-          <p style={loginStyles.subtitle}>{mode === 'login' ? 'Sign in to manage your restaurant operations.' : 'Create a secure staff account to access the POS.'}</p>
+          <p style={loginStyles.subtitle}>{mode === 'signup' ? 'Create a secure staff account to access the POS.' : 'Sign in to manage your restaurant operations.'}</p>
+
+          {mode !== 'signup' && (
+            <div style={{ display: 'flex', gap: '8px', marginBottom: '18px', background: '#f1f5f9', padding: '4px', borderRadius: '10px' }}>
+              <button
+                type="button"
+                onClick={() => { setMode('login'); setFeedback({ type: '', text: '' }); }}
+                style={{ flex: 1, padding: '8px 12px', border: 0, borderRadius: '8px', fontWeight: '700', fontSize: '12px', cursor: 'pointer', background: mode === 'login' ? '#fff' : 'transparent', color: mode === 'login' ? '#0f172a' : '#64748b', boxShadow: mode === 'login' ? '0 1px 3px rgba(0,0,0,0.1)' : 'none' }}
+              >
+                🔑 Password Login
+              </button>
+              <button
+                type="button"
+                onClick={() => { setMode('pin'); setFeedback({ type: '', text: '' }); }}
+                style={{ flex: 1, padding: '8px 12px', border: 0, borderRadius: '8px', fontWeight: '700', fontSize: '12px', cursor: 'pointer', background: mode === 'pin' ? '#fff' : 'transparent', color: mode === 'pin' ? '#0f172a' : '#64748b', boxShadow: mode === 'pin' ? '0 1px 3px rgba(0,0,0,0.1)' : 'none' }}
+              >
+                ⚡ Fast PIN Login
+              </button>
+            </div>
+          )}
 
           {feedback.text && <div role="alert" style={{ ...loginStyles.feedback, ...(feedback.type === 'error' ? loginStyles.feedbackError : loginStyles.feedbackSuccess) }}>{feedback.text}</div>}
 
-          {mode === 'login' ? <form onSubmit={handleSubmit} style={loginStyles.form}>
+          {mode === 'pin' ? (
+            <form onSubmit={handlePinLogin} style={loginStyles.form}>
+              <div style={loginStyles.inputGroup}>
+                <label style={loginStyles.label}>Enter 4-Digit Staff PIN</label>
+                <input
+                  type="password"
+                  maxLength={4}
+                  placeholder="● ● ● ●"
+                  value={pin}
+                  onChange={(e) => setPin(e.target.value.replace(/\D/g, '').slice(0, 4))}
+                  style={{ ...loginStyles.input, textAlign: 'center', fontSize: '24px', letterSpacing: '8px', fontWeight: 'bold' }}
+                  autoFocus
+                />
+              </div>
+
+              {/* Touch Numpad */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px', margin: '4px 0' }}>
+                {[1, 2, 3, 4, 5, 6, 7, 8, 9].map((num) => (
+                  <button
+                    key={num}
+                    type="button"
+                    onClick={() => setPin((prev) => (prev.length < 4 ? prev + num : prev))}
+                    style={{ padding: '12px', borderRadius: '10px', border: '1px solid #e2e8f0', background: '#f8fafc', fontSize: '18px', fontWeight: 'bold', cursor: 'pointer', color: '#1e293b' }}
+                  >
+                    {num}
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  onClick={() => setPin('')}
+                  style={{ padding: '12px', borderRadius: '10px', border: '1px solid #fecaca', background: '#fef2f2', fontSize: '13px', fontWeight: 'bold', cursor: 'pointer', color: '#dc2626' }}
+                >
+                  Clear
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPin((prev) => (prev.length < 4 ? prev + '0' : prev))}
+                  style={{ padding: '12px', borderRadius: '10px', border: '1px solid #e2e8f0', background: '#f8fafc', fontSize: '18px', fontWeight: 'bold', cursor: 'pointer', color: '#1e293b' }}
+                >
+                  0
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPin((prev) => prev.slice(0, -1))}
+                  style={{ padding: '12px', borderRadius: '10px', border: '1px solid #e2e8f0', background: '#f8fafc', fontSize: '16px', fontWeight: 'bold', cursor: 'pointer', color: '#64748b' }}
+                >
+                  ⌫
+                </button>
+              </div>
+
+              <div style={loginStyles.inputGroup}>
+                <label style={loginStyles.label}>Login as</label>
+                <div style={loginStyles.roleRow}>
+                  {roleOptions.map((option) => (
+                    <button
+                      key={option.value}
+                      type="button"
+                      onClick={() => setFormData({ ...formData, role: option.value })}
+                      style={{
+                        ...loginStyles.roleButton,
+                        ...(formData.role === option.value ? loginStyles.roleButtonActive : {})
+                      }}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <button type="submit" disabled={isSubmitting || pin.length < 4} style={{ ...loginStyles.button, opacity: (isSubmitting || pin.length < 4) ? 0.65 : 1 }}>
+                {isSubmitting ? 'Verifying PIN...' : '⚡ Quick Sign In'}
+              </button>
+            </form>
+          ) : mode === 'login' ? <form onSubmit={handleSubmit} style={loginStyles.form}>
             <div style={loginStyles.inputGroup}>
               <label style={loginStyles.label}>Email Address</label>
               <input

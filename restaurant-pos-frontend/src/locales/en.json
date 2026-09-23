@@ -1,0 +1,86 @@
+{
+  "app": {
+    "title": "Tamanna Restaurant POS",
+    "pureVeg": "100% Pure Vegetarian",
+    "welcome": "Welcome back",
+    "logout": "Logout",
+    "profile": "Profile"
+  },
+  "nav": {
+    "pos": "POS Billing",
+    "tables": "Tables",
+    "kitchen": "Kitchen (KDS)",
+    "orders": "Orders",
+    "inventory": "Inventory",
+    "customers": "Customers / CRM",
+    "reports": "Reports & Analytics",
+    "staff": "Staff Management",
+    "expenses": "Expenses",
+    "shifts": "Shift & Day-End",
+    "settings": "Settings"
+  },
+  "common": {
+    "save": "Save",
+    "cancel": "Cancel",
+    "delete": "Delete",
+    "edit": "Edit",
+    "add": "Add",
+    "search": "Search...",
+    "filter": "Filter",
+    "actions": "Actions",
+    "status": "Status",
+    "loading": "Loading...",
+    "success": "Success",
+    "error": "Error",
+    "confirm": "Confirm",
+    "back": "Back",
+    "print": "Print",
+    "downloadPdf": "Download PDF",
+    "exportExcel": "Export Excel",
+    "scanBarcode": "Scan Barcode",
+    "sendWhatsApp": "Send WhatsApp"
+  },
+  "kds": {
+    "title": "Kitchen Display System (KDS)",
+    "pureVegKitchen": "Pure Veg Live Kitchen Monitor",
+    "allStations": "All Stations",
+    "mainKitchen": "Main Kitchen",
+    "tandoor": "Tandoor",
+    "pantry": "Pantry",
+    "beverages": "Beverages",
+    "desserts": "Desserts",
+    "activeOrders": "Active KOTs",
+    "avgWait": "Avg Prep Time",
+    "table": "Table",
+    "waiter": "Server",
+    "markReady": "Mark All Ready",
+    "noOrders": "No pending orders in the kitchen. All tables served!"
+  },
+  "pos": {
+    "selectCategory": "Select Category",
+    "all": "All Items",
+    "cart": "Current Order",
+    "emptyCart": "No items selected yet",
+    "subtotal": "Subtotal",
+    "discount": "Discount",
+    "gst": "GST (5%)",
+    "grandTotal": "Grand Total",
+    "payNow": "Pay Now",
+    "sendToKitchen": "KOT (Kitchen)",
+    "paymentMode": "Payment Mode",
+    "cash": "Cash",
+    "card": "Card",
+    "upi": "UPI / QR",
+    "razorpay": "Razorpay Online"
+  },
+  "inventory": {
+    "title": "Inventory & Stock Management",
+    "stockLevel": "Stock Level",
+    "lowStockAlert": "Low Stock Alert",
+    "addNewItem": "Add Raw Material",
+    "unit": "Unit",
+    "costPerUnit": "Cost / Unit",
+    "quantity": "Quantity"
+  }
+}
+

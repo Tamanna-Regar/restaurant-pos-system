@@ -12,6 +12,7 @@ const itemSchema = new mongoose.Schema({
   taxRate: { type: Number, default: 5, min: 0, max: 100 },
   taxCategory: { type: String, enum: ['taxable', 'exempt', 'zero-rated'], default: 'taxable' },
   isAvailable: { type: Boolean, default: true },
+  kitchenStation: { type: String, enum: ['kitchen', 'bar', 'tandoor', 'dessert', 'pantry'], default: 'kitchen' },
   image: { type: String, default: 'https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=300' },
   floor: { type: String, default: 'Floor 1' },
   halfPrice: { type: Number, default: null },

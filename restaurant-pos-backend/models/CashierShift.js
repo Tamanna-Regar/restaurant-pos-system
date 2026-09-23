@@ -21,7 +21,16 @@ const cashierShiftSchema = new mongoose.Schema({
   closedAt: { type: Date, default: null },
   approvedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
   approvedAt: { type: Date, default: null },
-  notes: { type: String, default: '', maxlength: 500 }
+  notes: { type: String, default: '', maxlength: 500 },
+  denominations: {
+    d500: { type: Number, default: 0 },
+    d200: { type: Number, default: 0 },
+    d100: { type: Number, default: 0 },
+    d50: { type: Number, default: 0 },
+    d20: { type: Number, default: 0 },
+    d10: { type: Number, default: 0 },
+    coins: { type: Number, default: 0 }
+  }
 }, { timestamps: true });
 
 cashierShiftSchema.index({ cashier: 1, status: 1 });

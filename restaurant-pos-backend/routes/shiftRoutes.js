@@ -2,6 +2,7 @@ const express = require('express');
 const CashierShift = require('../models/CashierShift');
 const Payment = require('../models/Payment');
 const Expense = require('../models/Expense');
+const { logAudit } = require('../utils/auditLogger');
 
 const router = express.Router();
 const validDate = (date) => /^\d{4}-\d{2}-\d{2}$/.test(date);
@@ -14,7 +15,16 @@ async function calculateExpectedCash(shift) {
       { $group: { _id: null, amount: { $sum: '$grandTotal' } } }
     ]),
     Expense.aggregate([
-      { $match: { createdAt: { $gte: shift.createdAt, $lte: new Date() } } },
+      { 
+        $match: { 
+          createdAt: { $gte: shift.createdAt, $lte: new Date() },
+          $or: [
+            { paymentMode: 'Cash' },
+            { paymentMode: { $exists: false } },
+            { paymentMode: null }
+          ]
+        } 
+      },
       { $group: { _id: null, amount: { $sum: '$amount' } } }
     ])
   ]);
@@ -33,9 +43,104 @@ router.get('/', async (req, res) => {
   }
 });
 
+router.get('/current/summary', async (req, res) => {
+  try {
+    const shiftFilter = req.user.role === 'cashier'
+      ? { cashier: req.user._id, status: 'open' }
+      : { status: 'open' };
+    const shift = await CashierShift.findOne(shiftFilter);
+    if (!shift) return res.json({ success: true, data: null });
+
+    const now = new Date();
+    const [salesData, expenseData, orderData, orderTypeData] = await Promise.all([
+      Payment.aggregate([
+        { $match: { status: 'paid', paymentMode: 'Cash', settledAt: { $gte: shift.createdAt, $lte: now } } },
+        { $group: { _id: null, total: { $sum: '$grandTotal' }, count: { $sum: 1 } } }
+      ]),
+      Expense.aggregate([
+        { 
+          $match: { 
+            createdAt: { $gte: shift.createdAt, $lte: now },
+            $or: [
+              { paymentMode: 'Cash' },
+              { paymentMode: { $exists: false } },
+              { paymentMode: null }
+            ]
+          } 
+        },
+        { $group: { _id: null, total: { $sum: '$amount' } } }
+      ]),
+      Payment.aggregate([
+        { $match: { status: 'paid', settledAt: { $gte: shift.createdAt, $lte: now } } },
+        { $group: { _id: '$paymentMode', total: { $sum: '$grandTotal' }, count: { $sum: 1 } } }
+      ]),
+      // Order Breakdown by type: Dine-In / Takeaway / Delivery
+      Payment.aggregate([
+        { $match: { status: 'paid', settledAt: { $gte: shift.createdAt, $lte: now } } },
+        {
+          $lookup: {
+            from: 'orders',
+            localField: 'orderId',
+            foreignField: '_id',
+            as: 'order'
+          }
+        },
+        { $unwind: { path: '$order', preserveNullAndEmptyArrays: true } },
+        {
+          $group: {
+            _id: '$order.orderType',
+            count: { $sum: 1 },
+            total: { $sum: '$grandTotal' }
+          }
+        }
+      ])
+    ]);
+
+    const cashSales = money(salesData[0]?.total || 0);
+    const expenses = money(expenseData[0]?.total || 0);
+    const cashIn = money(shift.movements.filter(m => m.type === 'cash-in').reduce((s, m) => s + m.amount, 0));
+    const cashOut = money(shift.movements.filter(m => m.type === 'cash-out').reduce((s, m) => s + m.amount, 0));
+    const expectedCash = money(shift.openingCash + cashSales + cashIn - expenses - cashOut);
+
+    const durationMs = now - new Date(shift.createdAt);
+    const durationHrs = Math.floor(durationMs / 3600000);
+    const durationMins = Math.floor((durationMs % 3600000) / 60000);
+
+    const paymentBreakdown = {};
+    orderData.forEach(item => { paymentBreakdown[item._id] = { total: item.total, count: item.count }; });
+
+    const orderBreakdown = {};
+    orderTypeData.forEach(item => { orderBreakdown[item._id] = { count: item.count, total: money(item.total) }; });
+
+    res.json({
+      success: true,
+      data: {
+        openingCash: shift.openingCash,
+        cashSales,
+        cashIn,
+        cashOut,
+        expenses,
+        expectedCash,
+        movementsCount: shift.movements.length,
+        shiftDuration: `${durationHrs}h ${durationMins}m`,
+        shiftStarted: shift.createdAt,
+        paymentBreakdown,
+        orderBreakdown,
+        totalOrders: orderData.reduce((s, i) => s + i.count, 0)
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+
 router.get('/current', async (req, res) => {
   try {
-    const shift = await CashierShift.findOne({ cashier: req.user._id, status: 'open' }).populate('cashier', 'name email role');
+    const shiftFilter = req.user.role === 'cashier'
+      ? { cashier: req.user._id, status: 'open' }
+      : { status: 'open' };
+    const shift = await CashierShift.findOne(shiftFilter).populate('cashier', 'name email role');
     res.json({ success: true, data: shift });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -49,9 +154,22 @@ router.post('/open', async (req, res) => {
     if (!validDate(businessDate) || !Number.isFinite(openingCash) || openingCash < 0) {
       return res.status(400).json({ success: false, message: 'Valid businessDate and openingCash are required' });
     }
-    const existing = await CashierShift.findOne({ cashier: req.user._id, status: 'open' });
-    if (existing) return res.status(409).json({ success: false, message: 'You already have an open shift', data: existing });
+    const shiftFilter = req.user.role === 'cashier'
+      ? { cashier: req.user._id, status: 'open' }
+      : { status: 'open' };
+    const existing = await CashierShift.findOne(shiftFilter);
+    if (existing) return res.status(409).json({ success: false, message: 'An open shift is already active', data: existing });
     const shift = await CashierShift.create({ cashier: req.user._id, businessDate, openingCash });
+
+    await logAudit({
+      action: 'SHIFT_OPEN',
+      resource: 'Shift',
+      resourceId: String(shift._id),
+      user: req.user,
+      metadata: { businessDate, openingCash },
+      req
+    });
+
     res.status(201).json({ success: true, data: shift });
   } catch (error) {
     res.status(400).json({ success: false, message: error.message });
@@ -60,7 +178,10 @@ router.post('/open', async (req, res) => {
 
 router.post('/:id/movements', async (req, res) => {
   try {
-    const shift = await CashierShift.findOne({ _id: req.params.id, cashier: req.user._id, status: 'open' });
+    const shiftFilter = req.user.role === 'cashier'
+      ? { _id: req.params.id, cashier: req.user._id, status: 'open' }
+      : { _id: req.params.id, status: 'open' };
+    const shift = await CashierShift.findOne(shiftFilter);
     if (!shift) return res.status(404).json({ success: false, message: 'Open cashier shift not found' });
     const amount = Number(req.body.amount);
     const type = String(req.body.type || '');
@@ -70,6 +191,16 @@ router.post('/:id/movements', async (req, res) => {
     }
     shift.movements.push({ type, amount: money(amount), reason, createdBy: req.user._id });
     await shift.save();
+
+    await logAudit({
+      action: type === 'cash-in' ? 'CASH_IN' : 'CASH_OUT',
+      resource: 'Shift',
+      resourceId: String(shift._id),
+      user: req.user,
+      metadata: { type, amount, reason },
+      req
+    });
+
     res.status(201).json({ success: true, data: shift });
   } catch (error) {
     res.status(400).json({ success: false, message: error.message });
@@ -78,13 +209,50 @@ router.post('/:id/movements', async (req, res) => {
 
 router.post('/:id/close', async (req, res) => {
   try {
-    const shift = await CashierShift.findOne({ _id: req.params.id, cashier: req.user._id, status: 'open' });
+    const shiftFilter = req.user.role === 'cashier'
+      ? { _id: req.params.id, cashier: req.user._id, status: 'open' }
+      : { _id: req.params.id, status: 'open' };
+    const shift = await CashierShift.findOne(shiftFilter);
     if (!shift) return res.status(404).json({ success: false, message: 'Open cashier shift not found' });
     const closingCash = Number(req.body.closingCash);
     if (!Number.isFinite(closingCash) || closingCash < 0) return res.status(400).json({ success: false, message: 'Valid closingCash is required' });
     const expectedCash = await calculateExpectedCash(shift);
-    Object.assign(shift, { closingCash: money(closingCash), expectedCash, variance: money(closingCash - expectedCash), status: 'closed', closedBy: req.user._id, closedAt: new Date(), notes: String(req.body.notes || '').trim() });
+
+    const rawDenoms = req.body.denominations || {};
+    const denominations = {
+      d500: Math.max(0, Number(rawDenoms.d500 || rawDenoms[500] || 0)),
+      d200: Math.max(0, Number(rawDenoms.d200 || rawDenoms[200] || 0)),
+      d100: Math.max(0, Number(rawDenoms.d100 || rawDenoms[100] || 0)),
+      d50: Math.max(0, Number(rawDenoms.d50 || rawDenoms[50] || 0)),
+      d20: Math.max(0, Number(rawDenoms.d20 || rawDenoms[20] || 0)),
+      d10: Math.max(0, Number(rawDenoms.d10 || rawDenoms[10] || 0)),
+      coins: Math.max(0, Number(rawDenoms.coins || 0))
+    };
+
+    const variance = money(closingCash - expectedCash);
+
+    Object.assign(shift, {
+      closingCash: money(closingCash),
+      expectedCash,
+      variance,
+      status: 'closed',
+      closedBy: req.user._id,
+      closedAt: new Date(),
+      notes: String(req.body.notes || '').trim(),
+      denominations
+    });
     await shift.save();
+    await shift.populate('cashier', 'name email role');
+
+    await logAudit({
+      action: 'SHIFT_CLOSE',
+      resource: 'Shift',
+      resourceId: String(shift._id),
+      user: req.user,
+      metadata: { closingCash, expectedCash, variance, notes: shift.notes },
+      req
+    });
+
     res.json({ success: true, data: shift });
   } catch (error) {
     res.status(400).json({ success: false, message: error.message });
@@ -94,8 +262,22 @@ router.post('/:id/close', async (req, res) => {
 router.post('/:id/approve', async (req, res) => {
   try {
     if (!['admin', 'manager'].includes(req.user.role)) return res.status(403).json({ success: false, message: 'Only a manager or admin can approve a shift' });
-    const shift = await CashierShift.findOneAndUpdate({ _id: req.params.id, status: 'closed' }, { status: 'handed-over', approvedBy: req.user._id, approvedAt: new Date() }, { new: true });
+    const shift = await CashierShift.findOneAndUpdate(
+      { _id: req.params.id, status: 'closed' },
+      { status: 'handed-over', approvedBy: req.user._id, approvedAt: new Date() },
+      { new: true }
+    ).populate('cashier', 'name email role');
     if (!shift) return res.status(404).json({ success: false, message: 'Closed cashier shift not found' });
+
+    await logAudit({
+      action: 'SHIFT_APPROVE',
+      resource: 'Shift',
+      resourceId: String(shift._id),
+      user: req.user,
+      metadata: { cashierName: shift.cashier?.name },
+      req
+    });
+
     res.json({ success: true, data: shift });
   } catch (error) {
     res.status(400).json({ success: false, message: error.message });

@@ -4,18 +4,30 @@
     <meta charset="utf-8" />
     <link rel="icon" href="%PUBLIC_URL%/favicon.ico" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="theme-color" content="#000000" />
+    <meta name="theme-color" content="#16a34a" />
     <meta
       name="description"
-      content="Web site created using create-react-app"
+      content="Tamanna Restaurant POS - 100% Pure Vegetarian Restaurant ERP & Offline Billing System"
     />
     <link rel="apple-touch-icon" href="%PUBLIC_URL%/logo192.png" />
     <link rel="manifest" href="%PUBLIC_URL%/manifest.json" />
     
-    <title>React App</title>
+    <title>Tamanna Restaurant POS - 100% Pure Veg ERP</title>
 
-    <!-- Tailwind CSS CDN (Is line ko add karein) -->
+    <!-- Suppress Tailwind CDN production notice in console -->
+    <script>
+      (function() {
+        const origWarn = console.warn;
+        console.warn = function(...args) {
+          if (args[0] && typeof args[0] === 'string' && args[0].includes('cdn.tailwindcss.com')) return;
+          origWarn.apply(console, args);
+        };
+      })();
+    </script>
+    <!-- Tailwind CSS CDN -->
     <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Razorpay Checkout SDK -->
+    <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
   </head>
   <body>
     <noscript>You need to enable JavaScript to run this app.</noscript>
